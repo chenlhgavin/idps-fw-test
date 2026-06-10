@@ -17,6 +17,8 @@ serde_json = "1"
 anyhow = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 socket2 = { version = "0.5", features = ["all"] }
+# AF_PACKET raw ARP frames + SIOCGIFHWADDR for the ARP-spoof monitor (event 303).
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

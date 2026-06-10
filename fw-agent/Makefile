@@ -4,7 +4,7 @@
 # needs the NDK toolchain env. Use the repo-root targets for cross-builds and
 # device install:
 #
-#   make -C .. release-fwagent-android
+#   make -C .. release platform=android
 #   make -C .. push-fwagent DEVICE=<serial>
 #
 # The targets below are host-only convenience wrappers.

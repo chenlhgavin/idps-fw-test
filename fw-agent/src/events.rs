@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
-use crate::cli::EventQueryArgs;
+use crate::cli::{EventQueryArgs, ReportQueryArgs};
 
 fn open_db(args: &EventQueryArgs) -> Result<Connection> {
     Connection::open_with_flags(&args.db, OpenFlags::SQLITE_OPEN_READ_WRITE)
@@ -70,6 +70,41 @@ pub fn dump_events(args: &EventQueryArgs) -> Result<()> {
     println!(
         "{}",
         json!({ "since": args.since, "count": rows.len(), "events": rows })
+    );
+    Ok(())
+}
+
+/// Dump side-channel monitor reports from the outbox (events 102/231/303),
+/// optionally filtered by `report_type`, newer than `since` (epoch ms).
+pub fn dump_reports(args: &ReportQueryArgs) -> Result<()> {
+    let connection = Connection::open_with_flags(&args.db, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .with_context(|| format!("failed to open idps-fw state db {}", args.db.display()))?;
+    let sql = "SELECT report_id, report_type, payload, created_at_ms \
+               FROM report_outbox \
+               WHERE created_at_ms > ?1 AND (?2 IS NULL OR report_type = ?2) \
+               ORDER BY created_at_ms ASC";
+    let mut statement = connection
+        .prepare(sql)
+        .context("failed to prepare report_outbox query")?;
+    let type_filter = args.report_type.clone();
+    let rows = statement
+        .query_map(rusqlite::params![args.since, type_filter], |row| {
+            let payload: String = row.get(2)?;
+            let parsed: Value = serde_json::from_str(&payload).unwrap_or(Value::String(payload));
+            Ok(json!({
+                "report_id": row.get::<_, String>(0)?,
+                "report_type": row.get::<_, String>(1)?,
+                "payload": parsed,
+                "created_at_ms": row.get::<_, i64>(3)?,
+            }))
+        })
+        .context("failed to query report_outbox")?
+        .collect::<rusqlite::Result<Vec<Value>>>()
+        .context("failed to read report_outbox rows")?;
+
+    println!(
+        "{}",
+        json!({ "since": args.since, "count": rows.len(), "reports": rows })
     );
     Ok(())
 }

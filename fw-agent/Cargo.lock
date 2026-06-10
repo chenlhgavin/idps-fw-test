@@ -607,6 +607,7 @@ dependencies = [
  "clap",
  "idps-core",
  "idps-server",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

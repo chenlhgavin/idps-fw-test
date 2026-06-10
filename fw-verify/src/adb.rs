@@ -8,7 +8,6 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{bail, Context, Result};
-use serde_json::Value;
 
 fn adb_bin() -> String {
     std::env::var("FWV_ADB").unwrap_or_else(|_| "adb".to_string())
@@ -39,33 +38,6 @@ pub fn shell_full(serial: &str, remote_cmd: &str) -> Result<(i32, String, String
 pub fn shell(serial: &str, remote_cmd: &str) -> Result<String> {
     let (_code, stdout, _stderr) = shell_full(serial, remote_cmd)?;
     Ok(stdout.trim().to_string())
-}
-
-/// Run a remote command and parse its stdout as a single JSON value.
-pub fn shell_json(serial: &str, remote_cmd: &str) -> Result<Value> {
-    let (_code, stdout, stderr) = shell_full(serial, remote_cmd)?;
-    parse_json(&stdout).with_context(|| {
-        format!(
-            "remote `{remote_cmd}` did not return JSON (stdout: {}, stderr: {})",
-            stdout.trim(),
-            stderr.trim()
-        )
-    })
-}
-
-/// Parse JSON from command output: try the whole buffer, then the last
-/// non-empty line (commands print one JSON object, possibly after log noise).
-fn parse_json(stdout: &str) -> Result<Value> {
-    if let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) {
-        return Ok(value);
-    }
-    let last = stdout
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| line.starts_with('{') || line.starts_with('['))
-        .context("no JSON object found in output")?;
-    serde_json::from_str(last).context("failed to parse JSON output")
 }
 
 /// Enable root and wait for the device to come back.

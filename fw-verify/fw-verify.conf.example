@@ -3,12 +3,32 @@
 # Lines are `key = value`; `#` starts a comment. Precedence (high to low):
 #   command-line flag  >  FWV_* environment variable  >  this file  >  default
 #
-# Pass it with:  fw-verify.exe --config fw-verify.conf <subcommand>
+# Pass it with:  fw-verify --config fw-verify.conf <subcommand>
 
-# --- devices (required) ------------------------------------------------------
+# --- mode: android (two phones over adb) | host (local veth/netns) -----------
+# In host mode rules are delivered through the VSOC API (see the host section
+# below); `make setup-dev` in idps-fw-test generates a ready-to-use host config.
+mode = android
+
+# === ANDROID mode ============================================================
+# --- devices (required in android mode) --------------------------------------
 # adb serials (see `adb devices`).
 target_serial = 79MV5T5D85RSINQG
 peer_serial   = XGRWZXVSUKXW7XMF
+
+# === HOST mode ===============================================================
+# Uncomment these for `mode = host`. The peer veth end lives in a netns so
+# target<->peer traffic traverses idps-fw's monitored interface; run as root.
+# target_iface = fwt0
+# peer_iface   = fwp0
+# peer_netns   = fwpeer
+# target_ip    = 10.123.0.1
+# peer_ip      = 10.123.0.2
+# Rule delivery via the VSOC dashboard API (mutual TLS):
+# vsoc_url   = https://127.0.0.1:8443
+# vsoc_cert  = /home/ubuntu/workspace/idps/vsoc/certs/rsa/client.crt
+# vsoc_key   = /home/ubuntu/workspace/idps/vsoc/certs/rsa/client.key
+# vsoc_cacert = /home/ubuntu/workspace/idps/vsoc/certs/rsa/ca.crt
 
 # --- addresses (optional; auto-detected from the interface when omitted) -----
 target_ip = 172.20.10.3

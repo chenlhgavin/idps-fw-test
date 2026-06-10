@@ -6,7 +6,9 @@
 //! generates OS-socket traffic, and reads the idps-fw SQLite state. Each
 //! subcommand emits a single JSON object on stdout.
 
+mod arp;
 mod cli;
+mod connflood;
 mod events;
 mod listen;
 mod provision;
@@ -33,8 +35,11 @@ fn run() -> Result<()> {
         Command::ProvisionRule(args) => provision::run(&args),
         Command::DumpEvents(args) => events::dump_events(&args),
         Command::ReportStatus(args) => events::report_status(&args),
+        Command::DumpReports(args) => events::dump_reports(&args),
         Command::Traffic(args) => traffic::run(&args),
         Command::Listen(args) => listen::run(&args),
+        Command::ConnFlood(args) => connflood::run(&args),
+        Command::ArpSpoof(args) => arp::run(&args),
         Command::Now => now(),
     }
 }

@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use crate::adb;
+use crate::cli::Mode;
 use crate::config::RunConfig;
 use crate::target;
 
@@ -88,6 +89,12 @@ const DEFAULT_DEBUG_DSN: &str = "FWVERIFYTESTDSN01";
 /// then derives and persists the keystore itself; fw-agent reads the same
 /// identity, so both agree on one key. No-op when a keystore already exists.
 pub fn ensure_keystore(cfg: &RunConfig, vin: Option<&str>, dsn: Option<&str>) -> Result<()> {
+    if cfg.mode == Mode::Host {
+        // idps-server derives /data/idd/keys/aes.keystore at startup from the
+        // mock VIN/DSN; nothing for fw-verify to inject on host.
+        println!("host mode: keystore is derived by idps-server at startup (no action)");
+        return Ok(());
+    }
     adb::root(&cfg.target_serial)?;
     if keystore_present(cfg) {
         println!("keystore already present");
@@ -146,6 +153,13 @@ fn keystore_present(cfg: &RunConfig) -> bool {
 
 /// Apply the fast profile. Returns `true` if idps-fw came back healthy with it.
 pub fn apply(cfg: &RunConfig) -> Result<()> {
+    if cfg.mode == Mode::Host {
+        // The host idps-fw fast config (short intervals, identity override) is
+        // installed by `make setup-dev`; the daemons are started by the
+        // deployment, so there is no on-device config rewrite to apply here.
+        println!("host mode: fast profile is installed by `make setup-dev` (no action)");
+        return Ok(());
+    }
     adb::root(&cfg.target_serial)?;
     ensure_keystore(cfg, None, None)?;
     let remounted = adb::remount(&cfg.target_serial).unwrap_or(false);
@@ -182,6 +196,10 @@ pub fn apply(cfg: &RunConfig) -> Result<()> {
 
 /// Restore the backed-up idps-fw config and restart.
 pub fn restore(cfg: &RunConfig) -> Result<()> {
+    if cfg.mode == Mode::Host {
+        println!("host mode: no on-device config backup to restore (no action)");
+        return Ok(());
+    }
     adb::root(&cfg.target_serial)?;
     let _ = adb::remount(&cfg.target_serial);
     let restored = adb::shell(

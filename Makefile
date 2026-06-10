@@ -6,33 +6,30 @@
 #   fw-verify   host orchestrator (pure Rust; cross-builds to Windows .exe)
 #   fw-agent    on-device worker (cross-built to aarch64-linux-android)
 #
+# platform=host builds both crates; platform=android cross-builds fw-agent
+# only (fw-verify targets the host/Windows controller, never the device).
 # `make package-android` cross-builds fw-agent + fw-verify.exe and bundles an
 # Android system.zip payload + Windows install.bat + a distributable zip.
 
-platform ?= host
-BIN_INSTALL_DIR ?= /usr/local/bin
-ANDROID_BIN_INSTALL_DIR ?= /system/bin
-ANDROID_PACKAGE_OUT ?= $(abspath out/idps-fw-test)
-ANDROID_PACKAGE_ZIP ?= $(abspath out/idps-fw-test-$(shell date +%Y%m%d-%H%M).zip)
-DEVICE_SERIAL ?=
+.PHONY: help build release test lint fmt fmt-check check install setup-dev clean-dev test-host \
+        release-fwverify-windows push-fwagent package-android clean \
+        ensure-android-target ensure-android-clang ensure-device-provider-android ensure-host-platform
 
-RUST_TOOLCHAIN ?= 1.93.0
-RUST_CARGO := rustup run $(RUST_TOOLCHAIN) cargo
+.DEFAULT_GOAL := help
 
-# fw-verify: host orchestrator for idps-fw firewall tests (pure Rust).
-# fw-agent: on-device worker, cross-built to Android; it reuses idps-core +
-# idps-server (depot + keystore), so its Android build needs the same NDK
-# BUILD_ENV / device-provider prereqs below.
-FWVERIFY_DIR := $(abspath fw-verify)
-FWVERIFY_MANIFEST := $(FWVERIFY_DIR)/Cargo.toml
-FWVERIFY_CONF_EXAMPLE := $(FWVERIFY_DIR)/fw-verify.conf.example
-FWAGENT_DIR := $(abspath fw-agent)
-FWAGENT_MANIFEST := $(FWAGENT_DIR)/Cargo.toml
+RUSTUP_TOOLCHAIN ?= 1.93.0
+RUST_CARGO := rustup run $(RUSTUP_TOOLCHAIN) cargo
 
-# The Android package is consumed on a Windows controller (install.bat), so
-# fw-verify is cross-built to Windows and bundled alongside it.
-WINDOWS_TARGET ?= x86_64-pc-windows-gnu
-WINDOWS_FWVERIFY_BIN := $(FWVERIFY_DIR)/target/$(WINDOWS_TARGET)/release/fw-verify.exe
+ANDROID_TARGET := aarch64-linux-android
+ANDROID_API ?= 34
+ANDROID_HOME ?= $(HOME)/android-sdk
+ANDROID_NDK_HOME ?= $(ANDROID_HOME)/ndk/29.0.14206865
+ANDROID_TOOLCHAIN_BIN := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin
+ANDROID_CC := $(ANDROID_TOOLCHAIN_BIN)/$(ANDROID_TARGET)$(ANDROID_API)-clang
+ANDROID_CXX := $(ANDROID_TOOLCHAIN_BIN)/$(ANDROID_TARGET)$(ANDROID_API)-clang++
+ANDROID_AR := $(ANDROID_TOOLCHAIN_BIN)/llvm-ar
+ANDROID_RANLIB := $(ANDROID_TOOLCHAIN_BIN)/llvm-ranlib
+ANDROID_STRIP := $(ANDROID_TOOLCHAIN_BIN)/llvm-strip
 
 # fw-agent reuses idps-core/idps-server, whose build.rs links the native
 # libidps_device_provider.so. The shared library is a build artifact of the
@@ -41,148 +38,268 @@ WORKSPACE_ROOT := $(abspath ..)
 DEVICE_PROVIDER_ANDROID_LIB_DIR := $(WORKSPACE_ROOT)/device-provider/lib/android
 DEVICE_PROVIDER_ANDROID_LIB := $(DEVICE_PROVIDER_ANDROID_LIB_DIR)/libidps_device_provider.so
 
-ANDROID_TARGET := aarch64-linux-android
-ANDROID_FWAGENT_BIN := $(FWAGENT_DIR)/target/$(ANDROID_TARGET)/release/fw-agent
-
-ANDROID_API ?= 34
-ANDROID_HOME ?= $(HOME)/android-sdk
-ANDROID_NDK_HOME ?= $(ANDROID_HOME)/ndk/29.0.14206865
-ANDROID_NDK_BIN := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin
-ANDROID_LINKER := $(ANDROID_NDK_BIN)/$(ANDROID_TARGET)$(ANDROID_API)-clang
-ANDROID_CXX := $(ANDROID_NDK_BIN)/$(ANDROID_TARGET)$(ANDROID_API)-clang++
-ANDROID_AR := $(ANDROID_NDK_BIN)/llvm-ar
-ANDROID_RANLIB := $(ANDROID_NDK_BIN)/llvm-ranlib
-ANDROID_STRIP := $(ANDROID_NDK_BIN)/llvm-strip
-
-VALID_PLATFORMS := host android
-
-ifeq ($(filter $(platform),$(VALID_PLATFORMS)),)
-$(error unsupported platform '$(platform)'; expected one of: $(VALID_PLATFORMS))
-endif
-
-# fw-agent is the only cross-built artifact; it needs the NDK toolchain env and
-# the device-provider Android lib. fw-verify is pure Rust (host/Windows only).
-ifeq ($(platform),android)
-  FWAGENT_PREREQS := ensure-android-target ensure-android-toolchain ensure-device-provider-android
-  CARGO_TARGET := --target $(ANDROID_TARGET)
-  BUILD_ENV := PATH="$(ANDROID_NDK_BIN):$$PATH" \
+ANDROID_ENV := PATH="$(ANDROID_TOOLCHAIN_BIN):$$PATH" \
 	ANDROID_HOME=$(ANDROID_HOME) \
 	ANDROID_NDK_HOME=$(ANDROID_NDK_HOME) \
-	CC_aarch64_linux_android=$(ANDROID_LINKER) \
+	CC_aarch64_linux_android=$(ANDROID_CC) \
 	CXX_aarch64_linux_android=$(ANDROID_CXX) \
 	AR_aarch64_linux_android=$(ANDROID_AR) \
 	RANLIB_aarch64_linux_android=$(ANDROID_RANLIB) \
 	STRIP_aarch64_linux_android=$(ANDROID_STRIP) \
 	IDPS_PROVIDER_LIB_DIR_ANDROID="$(DEVICE_PROVIDER_ANDROID_LIB_DIR)" \
-	CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$(ANDROID_LINKER)
+	CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$(ANDROID_CC)
+
+# fw-verify: host orchestrator for idps-fw firewall tests (pure Rust).
+# fw-agent: on-device worker, cross-built to Android; it reuses idps-core +
+# idps-server (depot + keystore), so its Android build needs the NDK
+# $(ANDROID_ENV) and the device-provider prereqs below.
+FWVERIFY_DIR := $(abspath fw-verify)
+FWVERIFY_MANIFEST := $(FWVERIFY_DIR)/Cargo.toml
+FWVERIFY_CONF_EXAMPLE := $(FWVERIFY_DIR)/fw-verify.conf.example
+FWAGENT_DIR := $(abspath fw-agent)
+FWAGENT_MANIFEST := $(FWAGENT_DIR)/Cargo.toml
+ANDROID_FWAGENT_BIN := $(FWAGENT_DIR)/target/$(ANDROID_TARGET)/release/fw-agent
+
+# The Android package is consumed on a Windows controller (install.bat), so
+# fw-verify is cross-built to Windows and bundled alongside it.
+WINDOWS_TARGET ?= x86_64-pc-windows-gnu
+WINDOWS_FWVERIFY_BIN := $(FWVERIFY_DIR)/target/$(WINDOWS_TARGET)/release/fw-verify.exe
+
+# Build platform selection: host (default) or android cross-build. fw-agent is
+# the only cross-built artifact; fw-verify is pure Rust (host/Windows only).
+platform ?= host
+ifeq ($(platform),host)
+BUILD_ENV :=
+CARGO_TARGET :=
+BUILD_PREREQS :=
+else ifeq ($(platform),android)
+BUILD_ENV := $(ANDROID_ENV)
+CARGO_TARGET := --target $(ANDROID_TARGET)
+BUILD_PREREQS := ensure-android-target ensure-android-clang ensure-device-provider-android
 else
-  FWAGENT_PREREQS :=
-  CARGO_TARGET :=
-  BUILD_ENV :=
+$(error unknown platform '$(platform)'; use platform=host or platform=android)
 endif
 
-.PHONY: help \
-        build-fwverify release-fwverify test-fwverify lint-fwverify fmt-check-fwverify check-fwverify release-fwverify-windows \
-        build-fwagent release-fwagent release-fwagent-android lint-fwagent fmt-check-fwagent check-fwagent push-fwagent \
-        check install package-android clean \
-        ensure-android-target ensure-android-toolchain ensure-device-provider-android ensure-host-platform
+# Android packaging
+ANDROID_BIN_INSTALL_DIR ?= /system/bin
+ANDROID_PACKAGE_OUT ?= $(abspath out/idps-fw-test)
+ANDROID_PACKAGE_ZIP ?= $(abspath out/idps-fw-test-$(shell date +%Y%m%d-%H%M).zip)
+DEVICE_SERIAL ?=
 
-.DEFAULT_GOAL := help
+# Host runtime install
+BIN_INSTALL_DIR ?= /usr/local/bin
+HOST_LIB_INSTALL_DIR ?= /usr/local/lib
+
+# Host-mode test topology: a veth pair with the peer end in a network namespace
+# so target<->peer traffic traverses the idps-fw-monitored interface. Rules are
+# delivered through the VSOC dashboard API (mTLS) the production way.
+IDD_ETC ?= /etc/idd
+HOST_NETNS ?= fwpeer
+HOST_TARGET_IFACE ?= fwt0
+HOST_PEER_IFACE ?= fwp0
+HOST_TARGET_IP ?= 10.123.0.1
+HOST_PEER_IP ?= 10.123.0.2
+HOST_VETH_PREFIX ?= 24
+HOST_APP_UID ?= 2000
+HOST_APP_KEY ?= com.demo.browser
+FWV_CONF ?= $(IDD_ETC)/fw-verify.conf
+IDPS_FW_HOST_CONFIG ?= $(IDD_ETC)/idps-fw.yaml
+VSOC_CERT_DIR ?= $(WORKSPACE_ROOT)/vsoc/certs/rsa
+VSOC_URL ?= https://127.0.0.1:8443
+
+C_RESET  := \033[0m
+C_BOLD   := \033[1m
+C_DIM    := \033[2m
+C_CYAN   := \033[36m
+C_GREEN  := \033[32m
+C_YELLOW := \033[33m
+
+define print_command
+	@printf "  $(C_GREEN)%-26s$(C_RESET)%s\n" $(1) $(2)
+endef
+
+define print_arg
+	@printf "  %-26s$(C_DIM)%-10s$(C_RESET)%s\n" "" $(1) $(2)
+endef
 
 help:
-	@echo ""
-	@echo "  idps-fw-test  firewall functional-test toolset for idps-fw"
-	@echo ""
-	@echo "  Usage: make <target> [platform=host|android]"
-	@echo ""
-	@echo "  fw-verify (host orchestrator, drives both phones over adb):"
-	@echo "    build-fwverify / release-fwverify    dev or release build"
-	@echo "    test-fwverify / lint-fwverify        host tests / clippy"
-	@echo "    fmt-check-fwverify                    check format"
-	@echo "    check-fwverify                        fmt-check + lint + test"
-	@echo "    release-fwverify-windows              cross-build fw-verify.exe (needs rustup $(WINDOWS_TARGET) + mingw-w64)"
-	@echo ""
-	@echo "  fw-agent (on-device worker, cross-built to Android):"
-	@echo "    check-fwagent                         host fmt-check + clippy + test"
-	@echo "    release-fwagent-android               cross-build fw-agent"
-	@echo "    push-fwagent DEVICE=<serial>          install /system/bin/fw-agent on a phone"
-	@echo ""
-	@echo "  check                    host: check-fwverify + check-fwagent"
-	@echo "  install                  host: install fw-verify to $(BIN_INSTALL_DIR)"
-	@echo "  package-android          build fw-agent + fw-verify.exe, stage payload + install.bat + zip"
-	@echo "                           optional: ANDROID_PACKAGE_OUT=/abs/path ANDROID_PACKAGE_ZIP=/abs/path.zip DEVICE_SERIAL=<serial>"
-	@echo "  clean                    remove build/package artifacts"
-	@echo ""
+	@printf "\n"
+	@printf "  $(C_BOLD)$(C_CYAN)idps-fw-test$(C_RESET)  $(C_DIM)firewall functional-test toolset for idps-fw$(C_RESET)\n"
+	@printf "\n"
+	@printf "  $(C_DIM)Usage$(C_RESET)  make $(C_GREEN)<target>$(C_RESET) $(C_YELLOW)[platform=host|android]$(C_RESET)\n"
+	@printf "\n"
+	$(call print_command,"build","dev build (fw-verify + fw-agent)")
+	$(call print_arg,"default","platform=host")
+	$(call print_arg,"optional","platform=android (fw-agent only)")
+	$(call print_command,"release","release build")
+	$(call print_arg,"default","platform=host")
+	$(call print_arg,"optional","platform=android (fw-agent only)")
+	@printf "\n"
+	$(call print_command,"test","run host tests")
+	$(call print_command,"check","run fmt-check + lint + test")
+	@printf "\n"
+	$(call print_command,"install","host build + install fw-verify + fw-agent")
+	$(call print_command,"setup-dev","stage host veth/netns topology + configs")
+	$(call print_command,"clean-dev","remove host test topology and configs")
+	$(call print_command,"test-host","run the whole test catalog via fw-verify")
+	@printf "\n"
+	$(call print_command,"release-fwverify-windows","cross-build fw-verify.exe for the controller PC")
+	$(call print_command,"push-fwagent","install /system/bin/fw-agent on a phone")
+	$(call print_arg,"required","DEVICE=<adb-serial>")
+	$(call print_command,"package-android","assemble fw-agent payload + install.bat + zip")
+	$(call print_arg,"optional","ANDROID_PACKAGE_OUT=/abs/path")
+	$(call print_arg,"optional","ANDROID_PACKAGE_ZIP=/abs/path.zip")
+	$(call print_arg,"optional","DEVICE_SERIAL=<adb-serial>")
+	@printf "\n"
+	$(call print_command,"clean","remove Cargo build artifacts")
+	$(call print_command,"help","show this message")
+	@printf "\n"
 
-# --- fw-verify (idps-fw orchestrator, host only) -----------------------------
+build: $(BUILD_PREREQS)
+ifeq ($(platform),host)
+	$(RUST_CARGO) build --all-features --manifest-path "$(FWVERIFY_MANIFEST)"
+endif
+	$(BUILD_ENV) $(RUST_CARGO) build --all-features --manifest-path "$(FWAGENT_MANIFEST)" $(CARGO_TARGET)
 
-build-fwverify:
-	$(RUST_CARGO) build --manifest-path "$(FWVERIFY_MANIFEST)"
+release: $(BUILD_PREREQS)
+ifeq ($(platform),host)
+	$(RUST_CARGO) build --release --all-features --manifest-path "$(FWVERIFY_MANIFEST)"
+endif
+	$(BUILD_ENV) $(RUST_CARGO) build --release --all-features --manifest-path "$(FWAGENT_MANIFEST)" $(CARGO_TARGET)
 
-release-fwverify:
-	$(RUST_CARGO) build --release --manifest-path "$(FWVERIFY_MANIFEST)"
+test:
+	$(RUST_CARGO) test --all-features --manifest-path "$(FWVERIFY_MANIFEST)"
+	$(RUST_CARGO) test --all-features --manifest-path "$(FWAGENT_MANIFEST)"
 
-test-fwverify:
-	$(RUST_CARGO) test --manifest-path "$(FWVERIFY_MANIFEST)" --all-features
+lint:
+	$(RUST_CARGO) clippy --all-features --manifest-path "$(FWVERIFY_MANIFEST)" -- -D warnings
+	$(RUST_CARGO) clippy --all-features --manifest-path "$(FWAGENT_MANIFEST)" -- -D warnings
 
-lint-fwverify:
-	$(RUST_CARGO) clippy --manifest-path "$(FWVERIFY_MANIFEST)" --all-features -- -D warnings
+fmt:
+	cargo +nightly fmt --manifest-path "$(FWVERIFY_MANIFEST)"
+	cargo +nightly fmt --manifest-path "$(FWAGENT_MANIFEST)"
 
-fmt-check-fwverify:
+fmt-check:
 	cargo +nightly fmt --manifest-path "$(FWVERIFY_MANIFEST)" --check
+	cargo +nightly fmt --manifest-path "$(FWAGENT_MANIFEST)" --check
 
-check-fwverify: fmt-check-fwverify lint-fwverify test-fwverify
+check: fmt-check lint test
+
+clean:
+	rm -rf "$(FWVERIFY_DIR)/target" "$(FWAGENT_DIR)/target" out
+
+# Host install: build and install both the orchestrator (fw-verify) and the
+# worker (fw-agent) to a world-executable path so the app/UID test cases can
+# run fw-agent under an unprivileged uid via setpriv. fw-agent links the
+# device-provider libraries installed by the root `make install`, so run that
+# first; `ldconfig` makes /usr/local/lib resolvable for the uid-dropped child.
+install: ensure-host-platform
+	@$(MAKE) --no-print-directory build platform=host
+	@sudo install -d "$(BIN_INSTALL_DIR)"
+	@sudo install -m 755 "$(FWVERIFY_DIR)/target/debug/fw-verify" "$(BIN_INSTALL_DIR)/fw-verify"
+	@sudo install -m 755 "$(FWAGENT_DIR)/target/debug/fw-agent" "$(BIN_INSTALL_DIR)/fw-agent"
+	@sudo ldconfig
+	@printf "  $(C_GREEN)bin$(C_RESET): %s\n" "$(BIN_INSTALL_DIR)/fw-verify"
+	@printf "  $(C_GREEN)bin$(C_RESET): %s\n" "$(BIN_INSTALL_DIR)/fw-agent"
+	@printf "  $(C_DIM)next$(C_RESET): make setup-dev\n"
+
+# Host dev environment: create the veth/netns test topology, install a host
+# idps-fw config tuned for it (monitor the target veth, short poll intervals,
+# map the app uid), and write the fw-verify host config. Re-runnable. idps-fw
+# must be restarted afterwards to pick up the config; rules arrive via VSOC.
+setup-dev: ensure-host-platform
+	@printf "\n  $(C_BOLD)$(C_CYAN)idps-fw-test host test environment$(C_RESET)\n\n"
+	@sudo ip netns del "$(HOST_NETNS)" 2>/dev/null || true
+	@sudo ip link del "$(HOST_TARGET_IFACE)" 2>/dev/null || true
+	@sudo ip netns add "$(HOST_NETNS)"
+	@sudo ip link add "$(HOST_TARGET_IFACE)" type veth peer name "$(HOST_PEER_IFACE)"
+	@sudo ip link set "$(HOST_PEER_IFACE)" netns "$(HOST_NETNS)"
+	@sudo ip addr add "$(HOST_TARGET_IP)/$(HOST_VETH_PREFIX)" dev "$(HOST_TARGET_IFACE)"
+	@sudo ip link set "$(HOST_TARGET_IFACE)" up
+	@sudo ip netns exec "$(HOST_NETNS)" ip addr add "$(HOST_PEER_IP)/$(HOST_VETH_PREFIX)" dev "$(HOST_PEER_IFACE)"
+	@sudo ip netns exec "$(HOST_NETNS)" ip link set "$(HOST_PEER_IFACE)" up
+	@sudo ip netns exec "$(HOST_NETNS)" ip link set lo up
+	@printf "  $(C_GREEN)topology$(C_RESET): %s(%s) <-> netns %s:%s(%s)\n" "$(HOST_TARGET_IFACE)" "$(HOST_TARGET_IP)" "$(HOST_NETNS)" "$(HOST_PEER_IFACE)" "$(HOST_PEER_IP)"
+	@sudo install -d "$(IDD_ETC)"
+	@printf '%s\n' \
+		'runtime_config_path: /etc/idd/idps.yaml' \
+		'state_dir: /data/idd/idps-fw' \
+		'state_db_path: /data/idd/idps-fw/state.sqlite3' \
+		'ebpf_object_path: /etc/idd/idps-fw.bpf.o' \
+		'cgroup_path: /sys/fs/cgroup' \
+		'tc_ingress_ifaces:' \
+		'  - $(HOST_TARGET_IFACE)' \
+		'tc_egress_ifaces:' \
+		'  - $(HOST_TARGET_IFACE)' \
+		'rule_poll_interval_secs: 3' \
+		'initial_rule_timeout_secs: 30' \
+		'event_poll_interval_ms: 100' \
+		'identity_refresh_interval_secs: 10' \
+		'report_flush_interval_ms: 500' \
+		'report_ack_timeout_secs: 10' \
+		'traffic_cycle_secs: 5' \
+		'interface_categories:' \
+		'  - exact: $(HOST_TARGET_IFACE)' \
+		'    category: wifi' \
+		'identity_overrides:' \
+		'  - identity_key: "$(HOST_APP_KEY)"' \
+		'    uid: $(HOST_APP_UID)' \
+		'    pkg_name: "$(HOST_APP_KEY)"' \
+		'    app_name: "Browser"' \
+		| sudo tee "$(IDPS_FW_HOST_CONFIG)" >/dev/null
+	@printf "  $(C_GREEN)idps-fw config$(C_RESET): %s (monitors %s)\n" "$(IDPS_FW_HOST_CONFIG)" "$(HOST_TARGET_IFACE)"
+	@printf '%s\n' \
+		'# fw-verify host-mode config (generated by `make setup-dev`).' \
+		'mode = host' \
+		'target_iface = $(HOST_TARGET_IFACE)' \
+		'peer_iface = $(HOST_PEER_IFACE)' \
+		'peer_netns = $(HOST_NETNS)' \
+		'target_ip = $(HOST_TARGET_IP)' \
+		'peer_ip = $(HOST_PEER_IP)' \
+		'vsoc_url = $(VSOC_URL)' \
+		'vsoc_cert = $(VSOC_CERT_DIR)/client.crt' \
+		'vsoc_key = $(VSOC_CERT_DIR)/client.key' \
+		'fw_agent = fw-agent' \
+		'idps_fw = idps-fw' \
+		'app_uid = $(HOST_APP_UID)' \
+		'app_identity_key = $(HOST_APP_KEY)' \
+		| sudo tee "$(FWV_CONF)" >/dev/null
+	@printf "  $(C_GREEN)fw-verify config$(C_RESET): %s\n" "$(FWV_CONF)"
+	@printf "\n  $(C_DIM)next$(C_RESET): restart idps-fw, then: sudo NO_PROXY=127.0.0.1 fw-verify --config %s run-all\n\n" "$(FWV_CONF)"
+
+# Tear down the host test topology and generated config.
+clean-dev: ensure-host-platform
+	@sudo ip netns del "$(HOST_NETNS)" 2>/dev/null || true
+	@sudo ip link del "$(HOST_TARGET_IFACE)" 2>/dev/null || true
+	@sudo rm -f "$(FWV_CONF)"
+	@printf "  $(C_GREEN)removed$(C_RESET): netns %s, veth %s, %s\n" "$(HOST_NETNS)" "$(HOST_TARGET_IFACE)" "$(FWV_CONF)"
+
+# Convenience: run the whole catalog in host mode using the generated config.
+test-host: ensure-host-platform
+	@test -f "$(FWV_CONF)" || { echo "missing $(FWV_CONF); run: make setup-dev"; exit 1; }
+	@sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=$(HOST_LIB_INSTALL_DIR) \
+		"$(BIN_INSTALL_DIR)/fw-verify" --config "$(FWV_CONF)" run-all
 
 # Cross-build the orchestrator to Windows (.exe) for the controller PC.
-# Requires: rustup target add --toolchain $(RUST_TOOLCHAIN) $(WINDOWS_TARGET)
+# Requires: rustup target add --toolchain $(RUSTUP_TOOLCHAIN) $(WINDOWS_TARGET)
 #           and the mingw-w64 toolchain (x86_64-w64-mingw32-gcc).
 release-fwverify-windows:
-	@rustup target list --toolchain $(RUST_TOOLCHAIN) --installed | grep -qx "$(WINDOWS_TARGET)" || { \
-		echo "missing rust target $(WINDOWS_TARGET); run: rustup target add --toolchain $(RUST_TOOLCHAIN) $(WINDOWS_TARGET)"; exit 1; }
+	@rustup target list --toolchain $(RUSTUP_TOOLCHAIN) --installed | grep -qx "$(WINDOWS_TARGET)" || { \
+		echo "missing rust target $(WINDOWS_TARGET); run: rustup target add --toolchain $(RUSTUP_TOOLCHAIN) $(WINDOWS_TARGET)"; exit 1; }
 	@command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || { \
 		echo "missing mingw-w64 linker (x86_64-w64-mingw32-gcc); install the mingw-w64 toolchain"; exit 1; }
 	$(RUST_CARGO) build --release --manifest-path "$(FWVERIFY_MANIFEST)" --target $(WINDOWS_TARGET)
 
-# --- fw-agent (on-device worker; host check + Android cross-build) ------------
-# Reuses idps-core + idps-server, so the Android build needs $(FWAGENT_PREREQS)
-# (device-provider lib) and the $(BUILD_ENV) NDK toolchain env.
-
-build-fwagent: $(FWAGENT_PREREQS)
-	$(BUILD_ENV) $(RUST_CARGO) build --manifest-path "$(FWAGENT_MANIFEST)" $(CARGO_TARGET)
-
-release-fwagent: $(FWAGENT_PREREQS)
-	$(BUILD_ENV) $(RUST_CARGO) build --release --manifest-path "$(FWAGENT_MANIFEST)" $(CARGO_TARGET)
-
-release-fwagent-android:
-	$(MAKE) --no-print-directory release-fwagent platform=android
-
-lint-fwagent:
-	$(RUST_CARGO) clippy --manifest-path "$(FWAGENT_MANIFEST)" -- -D warnings
-
-fmt-check-fwagent:
-	cargo +nightly fmt --manifest-path "$(FWAGENT_MANIFEST)" --check
-
-check-fwagent: fmt-check-fwagent lint-fwagent
-	$(RUST_CARGO) test --manifest-path "$(FWAGENT_MANIFEST)"
-
-push-fwagent: release-fwagent-android
+# Cross-build fw-agent and install it to /system/bin on a connected phone.
+push-fwagent:
 	@if [ -z "$(DEVICE)" ]; then echo "usage: make push-fwagent DEVICE=<serial>"; exit 1; fi
+	@$(MAKE) --no-print-directory release platform=android
 	adb -s "$(DEVICE)" root
 	adb -s "$(DEVICE)" wait-for-device
 	-adb -s "$(DEVICE)" remount
 	adb -s "$(DEVICE)" push "$(ANDROID_FWAGENT_BIN)" /data/local/tmp/fw-agent
 	adb -s "$(DEVICE)" shell "cp /data/local/tmp/fw-agent /system/bin/fw-agent && chmod 755 /system/bin/fw-agent"
 	@echo "installed fw-agent to /system/bin on $(DEVICE)"
-
-# --- aggregate / install / package -------------------------------------------
-
-check: ensure-host-platform check-fwverify check-fwagent
-
-install: ensure-host-platform
-	@$(MAKE) --no-print-directory build-fwverify
-	@sudo install -d "$(BIN_INSTALL_DIR)"
-	@sudo install -m 755 "$(FWVERIFY_DIR)/target/debug/fw-verify" "$(BIN_INSTALL_DIR)/fw-verify"
-	@printf "  bin: %s\n" "$(BIN_INSTALL_DIR)/fw-verify"
 
 # Build fw-agent (system.zip) + fw-verify.exe (Windows controller) and assemble
 # the installable package (install.bat) + distributable zip.
@@ -194,8 +311,8 @@ package-android:
 	SCRIPT_PATH="$$OUTPUT_DIR/install.bat"; \
 	SYSTEM_ZIP_PATH="$$OUTPUT_DIR/system.zip"; \
 	ZIP_PATH="$(ANDROID_PACKAGE_ZIP)"; \
-	printf "\n  idps-fw-test Firewall Package (fw-agent + fw-verify)\n\n"; \
-	$(MAKE) --no-print-directory release-fwagent platform=android; \
+	printf "\n  $(C_BOLD)$(C_CYAN)idps-fw-test Firewall Package (fw-agent + fw-verify)$(C_RESET)\n\n"; \
+	$(MAKE) --no-print-directory release platform=android; \
 	$(MAKE) --no-print-directory release-fwverify-windows; \
 	test -x "$(ANDROID_FWAGENT_BIN)" || { echo "missing Android binary: $(ANDROID_FWAGENT_BIN)"; exit 1; }; \
 	test -f "$(WINDOWS_FWVERIFY_BIN)" || { echo "missing Windows binary: $(WINDOWS_FWVERIFY_BIN)"; exit 1; }; \
@@ -260,26 +377,21 @@ package-android:
 		'exit /b 1' \
 		> "$$SCRIPT_PATH"; \
 	python3 -c "import os, sys, zipfile; src, dst = sys.argv[1:3]; base = os.path.dirname(src); zf = zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED); [zf.write(os.path.join(root, name), os.path.relpath(os.path.join(root, name), base)) for root, _, files in os.walk(src) for name in files]; zf.close()" "$$OUTPUT_DIR" "$$ZIP_PATH"; \
-	printf "  systemzip: %s\n"   "$$SYSTEM_ZIP_PATH"; \
-	printf "  installer: %s\n"   "$$SCRIPT_PATH"; \
-	printf "  fwverify : %s\n"   "$$OUTPUT_DIR/fw-verify.exe"; \
-	printf "  fwconfig : %s\n"   "$$OUTPUT_DIR/fw-verify.conf"; \
-	printf "  zip      : %s\n\n" "$$ZIP_PATH"
-
-clean:
-	-$(RUST_CARGO) clean --manifest-path "$(FWVERIFY_MANIFEST)"
-	-$(RUST_CARGO) clean --manifest-path "$(FWAGENT_MANIFEST)"
-	rm -rf out build-out
+	printf "  $(C_GREEN)systemzip$(C_RESET): %s\n" "$$SYSTEM_ZIP_PATH"; \
+	printf "  $(C_GREEN)installer$(C_RESET): %s\n" "$$SCRIPT_PATH"; \
+	printf "  $(C_GREEN)fwverify$(C_RESET): %s\n" "$$OUTPUT_DIR/fw-verify.exe"; \
+	printf "  $(C_GREEN)fwconfig$(C_RESET): %s\n" "$$OUTPUT_DIR/fw-verify.conf"; \
+	printf "  $(C_GREEN)zip$(C_RESET): %s\n\n" "$$ZIP_PATH"
 
 ensure-android-target:
 	rustup target add $(ANDROID_TARGET)
 
-ensure-android-toolchain:
-	@test -x "$(ANDROID_LINKER)" || { echo "missing Android clang: $(ANDROID_LINKER)"; exit 1; }
+ensure-android-clang:
+	@test -x "$(ANDROID_CC)" || { echo "missing Android clang: $(ANDROID_CC)"; exit 1; }
 
-# fw-agent (via idps-core) links the native device-provider shared library. It is a build
-# artifact of the sibling device-provider repo, so build it (mock backend; ABI
-# matches real) via the root Makefile when it is missing.
+# fw-agent (via idps-core) links the native device-provider shared library. It
+# is a build artifact of the sibling device-provider repo, so build it (mock
+# backend; ABI matches real) via the root Makefile when it is missing.
 ensure-device-provider-android:
 	@test -f "$(DEVICE_PROVIDER_ANDROID_LIB)" || \
 		$(MAKE) --no-print-directory -C "$(WORKSPACE_ROOT)" build-device-provider platform=android DEVICE_PROVIDER=mock

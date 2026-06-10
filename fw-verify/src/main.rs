@@ -8,12 +8,15 @@ mod adb;
 mod catalog;
 mod cli;
 mod config;
+mod exec;
 mod fastprofile;
+mod monitor;
 mod peer;
 mod provision;
 mod report;
 mod target;
 mod verify;
+mod vsoc;
 
 use std::process::ExitCode;
 
@@ -40,8 +43,13 @@ fn main() -> ExitCode {
 /// Map a config-file key to its `FWV_*` environment variable.
 fn config_key_to_env(key: &str) -> Option<&'static str> {
     Some(match key {
+        "mode" => "FWV_MODE",
         "target_serial" | "target" => "FWV_TARGET",
         "peer_serial" | "peer" => "FWV_PEER",
+        "peer_netns" => "FWV_PEER_NETNS",
+        "vsoc_cert" => "FWV_VSOC_CERT",
+        "vsoc_key" => "FWV_VSOC_KEY",
+        "vsoc_cacert" => "FWV_VSOC_CACERT",
         "target_iface" => "FWV_TARGET_IFACE",
         "peer_iface" => "FWV_PEER_IFACE",
         "target_ip" => "FWV_TARGET_IP",
@@ -196,6 +204,7 @@ fn list() {
             catalog::Enforce::Blocked => "blocked",
             catalog::Enforce::Allowed => "allowed",
             catalog::Enforce::Sent => "sent",
+            catalog::Enforce::Refused => "refused",
         };
         let event = case.expect_event.as_ref().map_or_else(
             || "none".to_string(),
@@ -210,16 +219,24 @@ fn list() {
             event
         );
     }
+    for case in monitor::monitor_cases() {
+        println!(
+            "{:<26} {:<9} {:<14} {:<8} {}",
+            case.id, "monitor", "monitor", "report", case.notes
+        );
+    }
 }
 
 fn preflight(cfg: &RunConfig) -> Result<()> {
     let mut checks: Vec<(String, bool, String)> = Vec::new();
 
-    for (role, serial) in [("target", &cfg.target_serial), ("peer", &cfg.peer_serial)] {
-        let _ = adb::root(serial);
-        let state = adb::get_state(serial).unwrap_or_else(|_| "unknown".to_string());
-        checks.push((format!("{role} adb state"), state == "device", state));
-        let now = adb::shell_json(serial, &format!("{} now", cfg.fw_agent));
+    for (role, endpoint) in [("target", &cfg.target), ("peer", &cfg.peer)] {
+        let _ = endpoint.root();
+        let state = endpoint
+            .get_state()
+            .unwrap_or_else(|_| "unknown".to_string());
+        checks.push((format!("{role} reachable"), state == "device", state));
+        let now = endpoint.shell_json(&format!("{} now", cfg.fw_agent));
         let info = match &now {
             Ok(_) => "responds".to_string(),
             Err(error) => format!("{error:#}"),
@@ -237,12 +254,32 @@ fn preflight(cfg: &RunConfig) -> Result<()> {
     };
     checks.push(("idps-fw health".to_string(), health.is_ok(), health_info));
 
-    let depot = adb::shell(
-        &cfg.target_serial,
-        "[ -d /data/idd/rule/depot ] && echo yes || echo no",
-    )
-    .unwrap_or_default();
+    let depot = cfg
+        .target
+        .shell("[ -d /data/idd/rule/depot ] && echo yes || echo no")
+        .unwrap_or_default();
     checks.push(("target depot dir".to_string(), depot.contains("yes"), depot));
+
+    if cfg.mode == cli::Mode::Host {
+        let reachable = cfg
+            .peer
+            .shell(&format!(
+                "ping -c1 -W2 {} >/dev/null && echo ok",
+                cfg.target_ip
+            ))
+            .unwrap_or_default();
+        checks.push((
+            "peer->target link".to_string(),
+            reachable.contains("ok"),
+            reachable,
+        ));
+        let vsoc_ok = vsoc::events_mention(cfg, "").is_ok();
+        checks.push((
+            "vsoc api".to_string(),
+            vsoc_ok,
+            if vsoc_ok { "reachable" } else { "unreachable" }.to_string(),
+        ));
+    }
 
     let mut all_ok = true;
     for (label, pass, info) in &checks {
@@ -250,22 +287,27 @@ fn preflight(cfg: &RunConfig) -> Result<()> {
         all_ok &= *pass;
     }
 
-    // Keystore is advisory: `ensure-keystore` / `apply-fast-profile` can create it.
-    let keystore = adb::shell(
-        &cfg.target_serial,
-        "[ -e /data/idd/keys/aes.keystore ] && echo yes || echo no",
-    )
-    .unwrap_or_default();
-    if keystore.contains("yes") {
-        println!("[ok] target keystore: yes");
-    } else {
-        println!(
-            "[warn] target keystore: missing — run `fw-verify ensure-keystore` (or apply-fast-profile) to create it"
-        );
-    }
+    // Keystore is advisory: in android mode `ensure-keystore` creates it; in
+    // host mode idps-server derives it at startup from the mock VIN/DSN.
+    let keystore = cfg
+        .target
+        .shell("[ -e /data/idd/keys/aes.keystore ] && echo yes || echo no")
+        .unwrap_or_default();
+    println!(
+        "[{}] target keystore: {}",
+        if keystore.contains("yes") {
+            "ok"
+        } else {
+            "warn"
+        },
+        keystore
+    );
     println!(
         "\nTARGET={} ({})  PEER={} ({})",
-        cfg.target_serial, cfg.target_ip, cfg.peer_serial, cfg.peer_ip
+        cfg.target.label(),
+        cfg.target_ip,
+        cfg.peer.label(),
+        cfg.peer_ip
     );
     if all_ok {
         Ok(())

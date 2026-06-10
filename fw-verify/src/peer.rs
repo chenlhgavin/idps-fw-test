@@ -6,8 +6,8 @@ use std::process::Child;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::adb;
 use crate::config::RunConfig;
+use crate::exec::Endpoint;
 
 /// Parsed result of a `fw-agent traffic` run.
 ///
@@ -44,6 +44,7 @@ pub struct TrafficCmd {
     pub interval_ms: u64,
     pub await_reply: bool,
     pub fin_only: bool,
+    pub icmp_timestamp: bool,
 }
 
 impl TrafficCmd {
@@ -75,29 +76,28 @@ impl TrafficCmd {
         if self.fin_only {
             cmd.push_str(" --fin-only");
         }
+        if self.icmp_timestamp {
+            cmd.push_str(" --icmp-type timestamp");
+        }
         cmd
     }
 }
 
-/// Generate traffic from `serial`, optionally as a specific UID.
+/// Generate traffic from `endpoint`, optionally as a specific UID.
 pub fn traffic(
-    serial: &str,
+    endpoint: &Endpoint,
     cfg: &RunConfig,
     cmd: &TrafficCmd,
     uid: Option<u32>,
 ) -> Result<TrafficOutcome> {
     let inner = cmd.render(cfg);
-    let remote = match uid {
-        Some(uid) => format!("su {uid} -c '{inner}'"),
-        None => inner,
-    };
-    let value = adb::shell_json(serial, &remote)?;
+    let value = endpoint.shell_json_as(uid, &inner)?;
     serde_json::from_value(value).context("failed to parse traffic outcome")
 }
 
-/// Start a background listener on `serial`. Returns the local adb child.
+/// Start a background listener on `endpoint`. Returns the local child.
 pub fn start_listener(
-    serial: &str,
+    endpoint: &Endpoint,
     cfg: &RunConfig,
     proto: &str,
     port: u16,
@@ -107,10 +107,10 @@ pub fn start_listener(
         "{} listen {proto} --port {port} --duration-secs {duration_secs}",
         cfg.fw_agent
     );
-    adb::spawn_shell(serial, &cmd)
+    endpoint.spawn_shell(&cmd)
 }
 
-/// Best-effort teardown of any lingering fw-agent listeners on `serial`.
-pub fn stop_listeners(serial: &str, cfg: &RunConfig) {
-    let _ = adb::shell(serial, &format!("pkill -f '{} listen'", cfg.fw_agent));
+/// Best-effort teardown of any lingering fw-agent listeners on `endpoint`.
+pub fn stop_listeners(endpoint: &Endpoint, cfg: &RunConfig) {
+    let _ = endpoint.shell(&format!("pkill -f '{} listen'", cfg.fw_agent));
 }

@@ -11,11 +11,13 @@ use crate::catalog::{
     all_cases, bundle_order, case_by_id, firewall_text, traffic_cycle, Bundle, Enforce,
     ExpectEvent, FwCase, Group, Side, TrafficKind,
 };
-use crate::cli::ReportConfirm;
+use crate::cli::{Mode, ReportConfirm};
 use crate::config::RunConfig;
+use crate::exec::Endpoint;
 use crate::peer::{self, TrafficCmd};
 use crate::provision;
 use crate::target::{self, FwEvent};
+use crate::vsoc;
 
 const LISTEN_SECS: u64 = 12;
 const LISTEN_READY: Duration = Duration::from_millis(500);
@@ -47,6 +49,7 @@ fn bundle_name(bundle: Bundle) -> &'static str {
         Bundle::MatchFields => "match_fields",
         Bundle::Detection => "detection",
         Bundle::Traffic => "traffic",
+        Bundle::Priority => "priority",
     }
 }
 
@@ -74,6 +77,7 @@ fn enforce_str(enforce: Enforce) -> &'static str {
         Enforce::Blocked => "blocked",
         Enforce::Allowed => "allowed",
         Enforce::Sent => "sent",
+        Enforce::Refused => "refused",
     }
 }
 
@@ -81,10 +85,10 @@ fn describe_expect(expect: &ExpectEvent) -> String {
     format!("{}/{}/{}", expect.kind, expect.action, expect.proto)
 }
 
-fn serial(cfg: &RunConfig, side: Side) -> &str {
+fn endpoint(cfg: &RunConfig, side: Side) -> &Endpoint {
     match side {
-        Side::Peer => &cfg.peer_serial,
-        Side::Target => &cfg.target_serial,
+        Side::Peer => &cfg.peer,
+        Side::Target => &cfg.target,
     }
 }
 
@@ -116,6 +120,7 @@ fn build_cmd(case: &FwCase, to: IpAddr) -> TrafficCmd {
         interval_ms: 0,
         await_reply: false,
         fin_only: false,
+        icmp_timestamp: false,
     };
     match &case.traffic {
         TrafficKind::Tcp { dport } => TrafficCmd {
@@ -217,7 +222,11 @@ fn confirm_local_sent(cfg: &RunConfig, since: i64, event_id: &str) -> bool {
 }
 
 fn confirm_server_log(cfg: &RunConfig) -> String {
-    match crate::adb::shell(&cfg.target_serial, "logcat -d -t 400") {
+    // logcat is Android-only; on host idps-server logs to its own stream.
+    if cfg.mode == Mode::Host {
+        return "server-log:n/a-host".to_string();
+    }
+    match cfg.target.shell("logcat -d -t 400") {
         Ok(log) if log.contains("received report") => "server-log:found".to_string(),
         Ok(_) => "server-log:absent".to_string(),
         Err(_) => "server-log:unavailable".to_string(),
@@ -225,17 +234,10 @@ fn confirm_server_log(cfg: &RunConfig) -> String {
 }
 
 fn confirm_vsoc(cfg: &RunConfig) -> String {
-    let Some(base) = &cfg.vsoc_url else {
-        return "vsoc:no-url".to_string();
-    };
-    let url = format!("{}/api/events?limit=50", base.trim_end_matches('/'));
-    match ureq::get(&url).call() {
-        Ok(resp) => match resp.into_string() {
-            Ok(body) if body.contains(&cfg.target_ip.to_string()) => "vsoc:found".to_string(),
-            Ok(_) => "vsoc:absent".to_string(),
-            Err(_) => "vsoc:read-error".to_string(),
-        },
-        Err(_) => "vsoc:unreachable".to_string(),
+    match vsoc::events_mention(cfg, &cfg.target_ip.to_string()) {
+        Ok(true) => "vsoc:found".to_string(),
+        Ok(false) => "vsoc:absent".to_string(),
+        Err(error) => format!("vsoc:error({error:#})"),
     }
 }
 
@@ -252,7 +254,7 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
     let mut children = Vec::new();
     for spec in &case.listen {
         match peer::start_listener(
-            serial(cfg, spec.side),
+            endpoint(cfg, spec.side),
             cfg,
             spec.proto,
             spec.port,
@@ -282,7 +284,7 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
 
     let cmd = build_cmd(case, to);
     let uid = case.uid.then_some(cfg.app_uid);
-    let outcome = match peer::traffic(serial(cfg, case.origin), cfg, &cmd, uid) {
+    let outcome = match peer::traffic(endpoint(cfg, case.origin), cfg, &cmd, uid) {
         Ok(outcome) => outcome,
         Err(error) => {
             return finish(
@@ -306,6 +308,7 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
         Enforce::Blocked => outcome.verdict == "blocked",
         Enforce::Allowed => outcome.verdict == "allowed",
         Enforce::Sent => outcome.verdict == "sent",
+        Enforce::Refused => outcome.verdict == "refused",
     };
 
     // Detection.
@@ -394,7 +397,7 @@ fn run_traffic_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
     let (_src, _dst, to) = flow(cfg, case.origin);
     let cmd = build_cmd(case, to);
     let uid = case.uid.then_some(cfg.app_uid);
-    if let Err(error) = peer::traffic(serial(cfg, case.origin), cfg, &cmd, uid) {
+    if let Err(error) = peer::traffic(endpoint(cfg, case.origin), cfg, &cmd, uid) {
         return result(case, "FAIL", format!("traffic failed: {error:#}"));
     }
     // Wait for a traffic window (cycle=5s) to close plus a settle margin.
@@ -466,7 +469,7 @@ fn finish_with(
         let _ = child.kill();
     }
     for spec in &case.listen {
-        peer::stop_listeners(serial(cfg, spec.side), cfg);
+        peer::stop_listeners(endpoint(cfg, spec.side), cfg);
     }
     res.result = status.to_string();
     res.detail = detail;
@@ -487,6 +490,9 @@ fn provision_error(case: &FwCase, error: &anyhow::Error) -> CaseResult {
 
 /// Run one case by id (provisioning its bundle first).
 pub fn run_one(cfg: &RunConfig, id: &str) -> Vec<CaseResult> {
+    if let Some(results) = crate::monitor::run_monitor_one(cfg, id) {
+        return results;
+    }
     let Some(case) = case_by_id(id) else {
         return vec![CaseResult {
             id: id.to_string(),
@@ -511,12 +517,17 @@ pub fn run_one(cfg: &RunConfig, id: &str) -> Vec<CaseResult> {
 
 /// Run the cases in a group, provisioning each needed bundle once.
 pub fn run_group(cfg: &RunConfig, group: Group) -> Vec<CaseResult> {
+    if group == Group::Monitor {
+        return crate::monitor::run_monitor_all(cfg);
+    }
     run_filtered(cfg, |case| case.group == group)
 }
 
-/// Run the whole catalog, batching by bundle.
+/// Run the whole catalog, batching by bundle, then the side-channel monitors.
 pub fn run_all(cfg: &RunConfig) -> Vec<CaseResult> {
-    run_filtered(cfg, |_| true)
+    let mut results = run_filtered(cfg, |_| true);
+    results.extend(crate::monitor::run_monitor_all(cfg));
+    results
 }
 
 fn run_filtered(cfg: &RunConfig, keep: impl Fn(&FwCase) -> bool) -> Vec<CaseResult> {

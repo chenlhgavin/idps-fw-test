@@ -28,23 +28,30 @@ pub fn run(args: &ListenArgs) -> Result<()> {
     );
 
     match args.proto {
-        ListenProto::Tcp => listen_tcp(args.port, deadline),
+        ListenProto::Tcp => listen_tcp(args.port, deadline, args.hold),
         ListenProto::Udp => listen_udp(args.port, deadline),
     }
 }
 
-fn listen_tcp(port: u16, deadline: Instant) -> Result<()> {
+fn listen_tcp(port: u16, deadline: Instant, hold: bool) -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
         .with_context(|| format!("failed to bind tcp listener on {port}"))?;
     listener
         .set_nonblocking(true)
         .context("failed to set tcp listener nonblocking")?;
 
+    // In hold mode retain every accepted connection so it stays ESTABLISHED for
+    // the connection-count monitors; otherwise echo one read and move on.
+    let mut held = Vec::new();
     let mut accepted: u64 = 0;
     while Instant::now() < deadline {
         match listener.accept() {
             Ok((mut stream, _peer)) => {
                 accepted += 1;
+                if hold {
+                    held.push(stream);
+                    continue;
+                }
                 let mut buf = [0_u8; 256];
                 let _ = stream.set_read_timeout(Some(POLL));
                 if let Ok(read) = stream.read(&mut buf) {
@@ -57,6 +64,7 @@ fn listen_tcp(port: u16, deadline: Instant) -> Result<()> {
             Err(error) => return Err(error).context("tcp accept failed"),
         }
     }
+    drop(held);
     println!("{}", json!({ "status": "closed", "accepted": accepted }));
     Ok(())
 }

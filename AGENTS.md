@@ -21,15 +21,15 @@
 ## Preferred Workflow
 
 - For `idps-fw-test`-only work, prefer the local [Makefile](/home/ubuntu/workspace/idps/idps-fw-test/Makefile).
-- Common local entrypoints:
+- Common local entrypoints (same command set as `idps-fw/Makefile`):
   - `make check` — host fmt-check + clippy + test for both crates
-  - `make check-fwverify` / `make check-fwagent`
-  - `make release-fwagent-android` — cross-build `fw-agent` for Android
+  - `make build` / `make release` `[platform=host|android]` — host builds both crates;
+    `platform=android` cross-builds `fw-agent` only
   - `make release-fwverify-windows` — cross-build `fw-verify.exe` for the controller PC
   - `make push-fwagent DEVICE=<serial>` — install `/system/bin/fw-agent` on a phone
   - `make package-android` — assemble the Android payload (`system.zip`) + `install.bat` +
     `fw-verify.exe` + `fw-verify.conf` + a distributable zip
-  - `make install` — host-only: install the `fw-verify` host binary to `/usr/local/bin`
+  - `make install` — host-only: install `fw-verify` + `fw-agent` to `/usr/local/bin`
   - `make clean`
 - If you invoke Cargo directly, use the repo toolchain explicitly:
   - `rustup run 1.93.0 cargo test --all-features`

@@ -29,6 +29,12 @@ pub enum Command {
     Traffic(TrafficArgs),
     /// Run a short-lived TCP/UDP listener so allowed connections truly succeed.
     Listen(ListenArgs),
+    /// Open many concurrent TCP connections and hold them (TCP connection-count monitors).
+    ConnFlood(ConnFloodArgs),
+    /// Send gratuitous ARP replies for an IP (ARP-spoof detection, event 303).
+    ArpSpoof(ArpSpoofArgs),
+    /// Dump side-channel monitor reports (events 102/231/303) from the outbox.
+    DumpReports(ReportQueryArgs),
     /// Print the device wall clock as epoch milliseconds (event watermark).
     Now,
 }
@@ -84,8 +90,17 @@ pub enum Proto {
     Tcp,
     /// UDP datagram probe.
     Udp,
-    /// ICMP echo request.
+    /// ICMP request.
     Icmp,
+}
+
+/// ICMP message kind (for `proto icmp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum IcmpKind {
+    /// Echo request (type 8).
+    Echo,
+    /// Timestamp request (type 13) — vendor probe event 232.
+    Timestamp,
 }
 
 /// `traffic` arguments.
@@ -131,6 +146,66 @@ pub struct TrafficArgs {
     /// (needs root). Used to exercise FIN-only port-scan detection.
     #[arg(long, default_value_t = false)]
     pub fin_only: bool,
+
+    /// For ICMP, which request kind to send (echo or timestamp).
+    #[arg(long, value_enum, default_value_t = IcmpKind::Echo)]
+    pub icmp_type: IcmpKind,
+}
+
+/// `conn-flood` arguments: open and hold many concurrent TCP connections.
+#[derive(Debug, Args)]
+pub struct ConnFloodArgs {
+    /// Destination IP address.
+    #[arg(long)]
+    pub to: std::net::IpAddr,
+
+    /// Destination port (a held listener must accept here).
+    #[arg(long)]
+    pub dport: u16,
+
+    /// Number of concurrent connections to establish.
+    #[arg(long, default_value_t = 60)]
+    pub count: u32,
+
+    /// How long to hold the connections open, in seconds.
+    #[arg(long, default_value_t = 15)]
+    pub hold_secs: u64,
+
+    /// Per-connection connect timeout in milliseconds.
+    #[arg(long, default_value_t = 2000)]
+    pub timeout_ms: u64,
+}
+
+/// `arp-spoof` arguments: emit gratuitous ARP replies for an IP.
+#[derive(Debug, Args)]
+pub struct ArpSpoofArgs {
+    /// Interface to send on (e.g. the peer veth `fwp0`).
+    #[arg(long)]
+    pub iface: String,
+
+    /// The IPv4 address to falsely claim (sender protocol address).
+    #[arg(long)]
+    pub claim_ip: std::net::Ipv4Addr,
+
+    /// Number of gratuitous ARP replies to send.
+    #[arg(long, default_value_t = 5)]
+    pub count: u32,
+}
+
+/// Shared arguments for the side-channel report query.
+#[derive(Debug, Args)]
+pub struct ReportQueryArgs {
+    /// idps-fw SQLite state database.
+    #[arg(long, default_value = "/data/idd/idps-fw/state.sqlite3")]
+    pub db: PathBuf,
+
+    /// Only consider outbox rows with `created_at_ms` strictly greater than this.
+    #[arg(long, default_value_t = 0)]
+    pub since: i64,
+
+    /// Optional report-type filter (e.g. `tcp_conn_total`, `tcp_conn_per_ip`, `arp_spoof`).
+    #[arg(long)]
+    pub report_type: Option<String>,
 }
 
 /// Transport for the listener.
@@ -156,4 +231,9 @@ pub struct ListenArgs {
     /// How long to keep the listener open.
     #[arg(long, default_value_t = 60)]
     pub duration_secs: u64,
+
+    /// Retain accepted TCP connections (do not close them) so they stay
+    /// ESTABLISHED for the connection-count monitors.
+    #[arg(long, default_value_t = false)]
+    pub hold: bool,
 }

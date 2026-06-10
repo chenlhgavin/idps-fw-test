@@ -29,6 +29,15 @@ pub enum ReportConfirm {
     Vsoc,
 }
 
+/// Where the workers run and how rules are delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Mode {
+    /// Two Android phones over adb; rules written directly into the depot.
+    Android,
+    /// Local host with a veth/netns peer; rules delivered through the VSOC API.
+    Host,
+}
+
 /// Shared options that apply to every device-touching subcommand.
 ///
 /// Every option can also be set via a config file (`--config <file>`, lines of
@@ -40,13 +49,34 @@ pub struct GlobalArgs {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// adb serial of the TARGET device (runs idps-fw + idps-server).
+    /// Execution mode: `android` (two phones over adb) or `host` (local
+    /// veth/netns, rules delivered via the VSOC API).
+    #[arg(long, env = "FWV_MODE", value_enum, default_value_t = Mode::Android)]
+    pub mode: Mode,
+
+    /// adb serial of the TARGET device (android mode; runs idps-fw + idps-server).
     #[arg(long, env = "FWV_TARGET")]
     pub target_serial: Option<String>,
 
-    /// adb serial of the PEER device (traffic source/sink).
+    /// adb serial of the PEER device (android mode; traffic source/sink).
     #[arg(long, env = "FWV_PEER")]
     pub peer_serial: Option<String>,
+
+    /// Host mode: network namespace holding the PEER veth end.
+    #[arg(long, env = "FWV_PEER_NETNS", default_value = "fwpeer")]
+    pub peer_netns: String,
+
+    /// Host mode: VSOC dashboard client certificate (mTLS) for rule delivery.
+    #[arg(long, env = "FWV_VSOC_CERT")]
+    pub vsoc_cert: Option<String>,
+
+    /// Host mode: VSOC dashboard client key (mTLS) for rule delivery.
+    #[arg(long, env = "FWV_VSOC_KEY")]
+    pub vsoc_key: Option<String>,
+
+    /// Host mode: VSOC dashboard CA certificate (mTLS, optional).
+    #[arg(long, env = "FWV_VSOC_CACERT")]
+    pub vsoc_cacert: Option<String>,
 
     /// TARGET network interface.
     #[arg(long, env = "FWV_TARGET_IFACE", default_value = "wlan0")]

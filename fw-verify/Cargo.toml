@@ -10,10 +10,6 @@ clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-# HTTP only (VSOC dashboard is plain http on the LAN). Dropping default features
-# removes the rustls/ring TLS stack, keeping the crate pure-Rust so it
-# cross-compiles cleanly to Windows.
-ureq = { version = "2", default-features = false }
 
 [profile.release]
 opt-level = 3

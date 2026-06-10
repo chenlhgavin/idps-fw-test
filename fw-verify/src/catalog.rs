@@ -14,6 +14,7 @@ pub enum Group {
     Match,
     Detection,
     Traffic,
+    Monitor,
 }
 
 impl Group {
@@ -26,6 +27,7 @@ impl Group {
             Group::Match => "match",
             Group::Detection => "detection",
             Group::Traffic => "traffic",
+            Group::Monitor => "monitor",
         }
     }
 
@@ -38,8 +40,9 @@ impl Group {
             "match" => Group::Match,
             "detection" => Group::Detection,
             "traffic" => Group::Traffic,
+            "monitor" => Group::Monitor,
             other => bail!(
-                "unknown group `{other}` (ingress|default|egress|app|match|detection|traffic)"
+                "unknown group `{other}` (ingress|default|egress|app|match|detection|traffic|monitor)"
             ),
         })
     }
@@ -57,6 +60,7 @@ pub enum Bundle {
     MatchFields,
     Detection,
     Traffic,
+    Priority,
 }
 
 /// Which device performs an action.
@@ -104,6 +108,10 @@ pub enum Enforce {
     Allowed,
     /// Raw packet sent with no handshake/reply to judge (e.g. FIN scan).
     Sent,
+    /// Connection actively refused (RST). For NLD the first new-flow packet is
+    /// permitted, so a probe to a closed port is refused rather than dropped —
+    /// this is what distinguishes NLD (silent IPS-handoff) from LD (drop).
+    Refused,
 }
 
 /// Expected firewall_event for a case (`None` asserts no event).
@@ -184,8 +192,20 @@ pub fn firewall_text(bundle: Bundle, cfg: &RunConfig) -> String {
              sip=*,dip={target},dport=7300,proto=*,action=LD,chain=localin\n"
         ),
         Bundle::Detection => "chain=localin,action=LD\n".to_string(),
+        // Two overlapping ingress rules on the same port: idps-fw ranks later
+        // lines higher, so the line-3 block must win over the line-2 pass.
+        Bundle::Priority => format!(
+            "chain=localin,action=P\n\
+             sip={peer},dip={target},dport=8001,proto=tcp,action=P,chain=localin\n\
+             sip={peer},dip={target},dport=8001,proto=tcp,action=LD,chain=localin\n\
+             sip={peer},dip={target},dport=8002,proto=tcp,action=P,chain=localin\n"
+        ),
+        // The app policy registers the mapped uid as a known identity so the
+        // per-app traffic window is attributed (idps-fw only enriches app_ids
+        // that carry a policy); LP is allow, so it does not block the volume.
         Bundle::Traffic => format!(
             "chain=localin,action=P\n\
+             prog={key},action=LP\n\
              sip={peer},dip={target},dport=5301,proto=udp,action=P,chain=localin\n"
         ),
     }
@@ -239,7 +259,7 @@ fn listen(side: Side, proto: &'static str, port: u16) -> Vec<Listen> {
 /// The full case catalog.
 pub fn all_cases() -> Vec<FwCase> {
     use Bundle::*;
-    use Enforce::{Allowed, Blocked, Sent};
+    use Enforce::{Allowed, Blocked, Refused, Sent};
     use Group as G;
     use Side::{Peer, Target};
     use TrafficKind::*;
@@ -297,10 +317,10 @@ pub fn all_cases() -> Vec<FwCase> {
             sport: None,
             listen: vec![],
             traffic: Tcp { dport: 5004 },
-            expect_enforce: Blocked,
+            expect_enforce: Refused,
             expect_event: None,
             skip: None,
-            notes: "BlockSilent drops the SYN without recording an event",
+            notes: "NLD passes the first new-flow SYN (IPS handoff): the probe reaches the closed port and is refused (RST), with no event — distinct from LD which drops the SYN (blocked)",
         },
         // --- DEFAULT policy ---
         FwCase {
@@ -577,12 +597,12 @@ pub fn all_cases() -> Vec<FwCase> {
             sport: None,
             listen: vec![],
             traffic: TcpScan {
-                dports: vec![9001, 9002, 9003],
+                dports: vec![9001, 9002, 9003, 9004, 9005],
             },
             expect_enforce: Blocked,
             expect_event: event_d("PortScan", "Block", "tcp", None, None, "tcp portscan attack"),
             skip: None,
-            notes: "3 distinct dst ports within 1s -> PortScan",
+            notes: "≥3 distinct dst ports in a <1s burst -> PortScan; sent as 5 so the global vendor detector fires even if prior cases left slot residue",
         },
         FwCase {
             id: "detect-portscan-udp",
@@ -593,12 +613,12 @@ pub fn all_cases() -> Vec<FwCase> {
             sport: None,
             listen: vec![],
             traffic: UdpScan {
-                dports: vec![9001, 9002, 9003],
+                dports: vec![9001, 9002, 9003, 9004, 9005],
             },
             expect_enforce: Sent,
             expect_event: event_d("PortScan", "Block", "udp", None, None, "udp portscan attack"),
             skip: None,
-            notes: "3 distinct UDP dst ports within 1s -> PortScan (UDP fire-and-forget => verdict 'sent'; PortScan event proves the drop+detection)",
+            notes: "≥3 distinct UDP dst ports in a <1s burst -> PortScan (UDP fire-and-forget => verdict 'sent'); 5 ports for detector robustness",
         },
         FwCase {
             id: "detect-portscan-tcp-fin",
@@ -609,7 +629,7 @@ pub fn all_cases() -> Vec<FwCase> {
             sport: None,
             listen: vec![],
             traffic: TcpFinScan {
-                dports: vec![9011, 9012, 9013],
+                dports: vec![9011, 9012, 9013, 9014, 9015],
             },
             expect_enforce: Sent,
             expect_event: event_d(
@@ -621,7 +641,7 @@ pub fn all_cases() -> Vec<FwCase> {
                 "tcp fin portscan attack",
             ),
             skip: None,
-            notes: "3 distinct dst ports hit by bare-FIN packets within 1s -> FIN PortScan (raw socket on PEER, needs root; verdict 'sent')",
+            notes: "≥3 distinct dst ports hit by bare-FIN packets in a <1s burst -> FIN PortScan (raw socket on PEER, needs root; verdict 'sent'); 5 ports for detector robustness",
         },
         FwCase {
             id: "detect-conn-abnormal",
@@ -698,6 +718,35 @@ pub fn all_cases() -> Vec<FwCase> {
             skip: None,
             notes: "Volume from the mapped UID attributes wifi bytes to an app window",
         },
+        // --- PRIORITY (rule precedence) ---
+        FwCase {
+            id: "priority-later-wins",
+            group: G::Match,
+            bundle: Priority,
+            origin: Peer,
+            uid: false,
+            sport: None,
+            listen: listen(Target, "tcp", 8001),
+            traffic: Tcp { dport: 8001 },
+            expect_enforce: Blocked,
+            expect_event: None,
+            skip: None,
+            notes: "Two rules on dport 8001 (Pass then Block): the later, higher-priority Block wins -> blocked",
+        },
+        FwCase {
+            id: "priority-control-pass",
+            group: G::Match,
+            bundle: Priority,
+            origin: Peer,
+            uid: false,
+            sport: None,
+            listen: listen(Target, "tcp", 8002),
+            traffic: Tcp { dport: 8002 },
+            expect_enforce: Allowed,
+            expect_event: None,
+            skip: None,
+            notes: "Control: dport 8002 has only a Pass rule -> allowed (proves the block above is rule-specific, not a side effect)",
+        },
     ]
 }
 
@@ -713,6 +762,7 @@ pub fn bundle_order() -> &'static [Bundle] {
         Bundle::MatchFields,
         Bundle::Detection,
         Bundle::Traffic,
+        Bundle::Priority,
     ]
 }
 
@@ -756,6 +806,7 @@ mod tests {
             Group::Match,
             Group::Detection,
             Group::Traffic,
+            Group::Monitor,
         ] {
             assert_eq!(Group::parse(group.as_str()).unwrap(), group);
         }

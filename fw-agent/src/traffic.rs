@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
 
-use crate::cli::{Proto, TrafficArgs};
+use crate::cli::{IcmpKind, Proto, TrafficArgs};
 
 /// Result of a single attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +165,26 @@ fn build_icmp_echo(ident: u16, seq: u16) -> [u8; 16] {
     packet
 }
 
-fn icmp_attempt(dst: IpAddr, ident: u16, seq: u16, timeout: Duration) -> Result<Outcome> {
+/// Build an ICMP timestamp request (type 13): header + identifier/sequence +
+/// three 32-bit timestamp fields, all zero. This is the vendor probe (event 232).
+fn build_icmp_timestamp(ident: u16, seq: u16) -> [u8; 20] {
+    let mut packet = [0_u8; 20];
+    packet[0] = 13; // timestamp request
+    packet[4..6].copy_from_slice(&ident.to_be_bytes());
+    packet[6..8].copy_from_slice(&seq.to_be_bytes());
+    // bytes 8..20 are the originate/receive/transmit timestamps, left zero.
+    let checksum = icmp_checksum(&packet);
+    packet[2..4].copy_from_slice(&checksum.to_be_bytes());
+    packet
+}
+
+fn icmp_attempt(
+    dst: IpAddr,
+    ident: u16,
+    seq: u16,
+    kind: IcmpKind,
+    timeout: Duration,
+) -> Result<Outcome> {
     let IpAddr::V4(_) = dst else {
         return Err(anyhow!("icmp traffic currently supports IPv4 only"));
     };
@@ -174,6 +193,16 @@ fn icmp_attempt(dst: IpAddr, ident: u16, seq: u16, timeout: Duration) -> Result<
     socket
         .set_read_timeout(Some(timeout))
         .context("failed to set icmp read timeout")?;
+    // A timestamp probe is a one-way detection trigger: send it and report
+    // "sent" without waiting for a (usually absent) reply.
+    if kind == IcmpKind::Timestamp {
+        let packet = build_icmp_timestamp(ident, seq);
+        let target = SocketAddr::new(dst, 0);
+        socket
+            .send_to(&packet, &target.into())
+            .context("failed to send icmp timestamp request")?;
+        return Ok(Outcome::Sent);
+    }
     let packet = build_icmp_echo(ident, seq);
     let target = SocketAddr::new(dst, 0);
     socket
@@ -303,6 +332,56 @@ pub fn run(args: &TrafficArgs) -> Result<()> {
     let mut seq: u16 = 0;
     let mut first = true;
 
+    // Bare-FIN probes need a unique source port per (process, port): the
+    // firewall's new-flow gate keys on the 5-tuple, so a fixed source port would
+    // make repeated scans look like established flows and skip detection. A real
+    // FIN scanner likewise varies source ports. The kernel chooses ephemeral
+    // ports for normal TCP/UDP, so this only applies to the raw-socket FIN path.
+    let fin_sport_base = 20000_u16.wrapping_add((std::process::id() as u16) % 20000);
+    let mut fin_offset: u16 = 0;
+
+    // A multi-port TCP scan (SYN connect or bare-FIN) fires its probes as a tight
+    // parallel burst so they land within one detector window (the vendor
+    // port-scan check quantizes to whole seconds); firing them sequentially —
+    // each blocking on a connect timeout or a per-packet route lookup — could
+    // straddle a second boundary and miss detection.
+    if args.proto == Proto::Tcp && ports.len() > 1 && args.count <= 1 {
+        let fin_only = args.fin_only;
+        let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
+            let handles: Vec<_> = ports
+                .iter()
+                .enumerate()
+                .map(|(index, &port)| {
+                    let dst = SocketAddr::new(args.to, port);
+                    scope.spawn(move || {
+                        if fin_only {
+                            let sport = args.sport.unwrap_or_else(|| {
+                                let p = fin_sport_base.wrapping_add(index as u16);
+                                if p < 1024 {
+                                    p | 0x4000
+                                } else {
+                                    p
+                                }
+                            });
+                            fin_attempt(dst, Some(sport), index as u32 + 1)
+                                .unwrap_or(Outcome::Other)
+                        } else {
+                            tcp_attempt(dst, args.sport, timeout).unwrap_or(Outcome::Other)
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or(Outcome::Other))
+                .collect()
+        });
+        for outcome in outcomes {
+            tally.record(outcome);
+        }
+        return emit(args, &ports, &tally);
+    }
+
     for &port in &ports {
         for _ in 0..args.count.max(1) {
             if !first && !interval.is_zero() {
@@ -312,7 +391,16 @@ pub fn run(args: &TrafficArgs) -> Result<()> {
             let outcome = match args.proto {
                 Proto::Tcp if args.fin_only => {
                     seq = seq.wrapping_add(1);
-                    fin_attempt(SocketAddr::new(args.to, port), args.sport, u32::from(seq))?
+                    let sport = args.sport.unwrap_or_else(|| {
+                        let port = fin_sport_base.wrapping_add(fin_offset);
+                        if port < 1024 {
+                            port | 0x4000
+                        } else {
+                            port
+                        }
+                    });
+                    fin_offset = fin_offset.wrapping_add(1);
+                    fin_attempt(SocketAddr::new(args.to, port), Some(sport), u32::from(seq))?
                 }
                 Proto::Tcp => tcp_attempt(SocketAddr::new(args.to, port), args.sport, timeout)?,
                 Proto::Udp => udp_attempt(
@@ -323,13 +411,18 @@ pub fn run(args: &TrafficArgs) -> Result<()> {
                 )?,
                 Proto::Icmp => {
                     seq = seq.wrapping_add(1);
-                    icmp_attempt(args.to, ident, seq, timeout)?
+                    icmp_attempt(args.to, ident, seq, args.icmp_type, timeout)?
                 }
             };
             tally.record(outcome);
         }
     }
 
+    emit(args, &ports, &tally)
+}
+
+/// Print the single-line JSON result the orchestrator parses.
+fn emit(args: &TrafficArgs, ports: &[u16], tally: &Tally) -> Result<()> {
     let out = json!({
         "proto": format!("{:?}", args.proto).to_lowercase(),
         "to": args.to.to_string(),
