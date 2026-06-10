@@ -1,0 +1,24 @@
+[package]
+name = "fw-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+description = "On-device worker for idps-fw functional tests. Writes encrypted rule depot files (reusing idps-server's RuleDepot + keystore), generates OS-socket traffic, and reads idps-fw SQLite state. Cross-compiled to aarch64-linux-android and driven by the fw-verify orchestrator over adb."
+
+[dependencies]
+# Internal crates (path deps via repo sync) — reused for byte-exact depot
+# encryption and the same VIN/DSN keystore derivation idps-server uses.
+idps-core = { path = "../../idps-base/crates/idps-core" }
+idps-server = { path = "../../idps-server" }
+
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+socket2 = { version = "0.5", features = ["all"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

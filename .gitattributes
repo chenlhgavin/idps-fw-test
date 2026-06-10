@@ -1,0 +1,4 @@
+# Windows batch scripts must keep CRLF line endings, or cmd.exe misparses
+# them: with LF-only endings it seeks to wrong byte offsets on call/goto and
+# silently skips lines. Keep *.bat as CRLF in every working tree.
+*.bat text eol=crlf

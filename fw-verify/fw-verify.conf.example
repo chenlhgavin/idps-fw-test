@@ -1,0 +1,39 @@
+# fw-verify configuration file.
+#
+# Lines are `key = value`; `#` starts a comment. Precedence (high to low):
+#   command-line flag  >  FWV_* environment variable  >  this file  >  default
+#
+# Pass it with:  fw-verify.exe --config fw-verify.conf <subcommand>
+
+# --- devices (required) ------------------------------------------------------
+# adb serials (see `adb devices`).
+target_serial = 79MV5T5D85RSINQG
+peer_serial   = XGRWZXVSUKXW7XMF
+
+# --- addresses (optional; auto-detected from the interface when omitted) -----
+target_ip = 172.20.10.3
+peer_ip   = 172.20.10.2
+
+# --- interfaces (default wlan0) ----------------------------------------------
+# target_iface = wlan0
+# peer_iface   = wlan0
+
+# --- app / UID policy case ---------------------------------------------------
+# identity_overrides maps app_identity_key -> app_uid (injected by apply-fast-profile).
+# app_uid          = 2000
+# app_identity_key = com.demo.browser
+# app_pkg          = com.demo.browser
+# app_name         = Browser
+
+# --- report-to-idps-server confirmation: local | server | vsoc ---------------
+# report_confirm = local
+# vsoc_url       = http://172.20.10.10:8000
+
+# --- timings -----------------------------------------------------------------
+# reload_timeout_secs = 30
+# event_settle_ms     = 1500
+
+# --- on-device binary/path overrides (rarely needed) -------------------------
+# fw_agent = fw-agent
+# idps_fw  = idps-fw
+# state_db = /data/idd/idps-fw/state.sqlite3

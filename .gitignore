@@ -1,0 +1,17 @@
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+
+# Build / package outputs
+/build-out/
+/out/
+
+# Rust build artifacts. Ignore every crate's target/ (fw-agent, fw-verify, and
+# any crate added later) plus Cargo's local backups. Cargo.lock stays tracked —
+# these crates build binaries.
+target/
+Cargo.lock.bak
+*.rs.bk
