@@ -224,7 +224,7 @@ sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
 
 Host 模式下这一步不会走 adb。TARGET 是本机，PEER 是 `ip netns exec fwpeer ...`。
 
-再看 `idps-fw` health：
+需要进一步确认 `idps-fw` 运行状态时，可用隐藏的高级诊断命令查看 health：
 
 ```bash
 sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
@@ -237,14 +237,7 @@ sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
 - 监控接口包含 `fwt0`。
 - eBPF object 路径是 `/etc/idd/idps-fw.bpf.o`。
 
-Host 模式的 `apply-fast-profile` 是 no-op，因为短轮询配置已经由 `make setup-dev` 写入：
-
-```bash
-sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
-  fw-verify --config /etc/idd/fw-verify.conf apply-fast-profile
-```
-
-输出应说明 Host 模式配置由 `make setup-dev` 提供。
+Host 模式不需要跑 `apply-fast-profile`；短轮询配置已经由 `make setup-dev` 写入。
 
 ---
 
@@ -266,7 +259,7 @@ sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
 
 每条用例会输出 `PASS` 或 `FAIL`。`run-all` 会按 bundle 批量下发规则，避免每条 case 重复 provision。
 
-跑完后可以查看统计：
+跑完后如需排障，可以用隐藏的高级诊断命令查看统计：
 
 ```bash
 sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
@@ -322,6 +315,8 @@ sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
 sudo NO_PROXY=127.0.0.1,localhost LD_LIBRARY_PATH=/usr/local/lib \
   fw-verify --config /etc/idd/fw-verify.conf run ingress-tuple-block
 ```
+
+高级维护/排障命令仍可直接执行，但不出现在默认 `fw-verify -h` 中。
 
 重置测试下发的规则：
 

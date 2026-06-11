@@ -23,24 +23,29 @@ fw-verify.exe --config fw-verify.conf run default-deny-carveout
 
 ## 1. fw-verify 命令速查
 
-所有命令都带 `--config fw-verify.conf`（或用 `--target-serial/--peer-serial` 显式指定，否则报 `--target-serial required`）。
+所有日常命令都带 `--config fw-verify.conf`。设备、IP、接口、超时、上报确认等高级配置写在配置文件里，普通命令行不再展开这些参数。
 
 | 命令 | 作用 |
 |---|---|
 | `preflight` | 校验两机在线、idps-fw 可响应、两机都有 fw-agent |
-| `apply-fast-profile` | **一次性准备**：注入 keystore + `identity_overrides` + 短轮询配置并重启 idps-fw/idps-server |
-| `restore-profile` | 从 `/etc/idd/idps-fw.yaml.fwv-bak` 还原配置并重启 idps-fw |
-| `ensure-keystore [--vin V --dsn D]` | 仅补运行时 keystore（`apply-fast-profile` 已含此步，单独用得少） |
 | `list` | 列出全部 case-id 及其分组 |
 | `run <id>` | **跑单条用例**：下发规则→起监听→发流量→判 enforcement + 事件 + 上报→`PASS`/`FAIL` |
 | `run-group <组>` | 跑整组（`ingress\|default\|egress\|app\|match\|detection\|traffic`），每个 bundle 只下发一次 |
 | `run-all` | 按 bundle 批量跑完整目录 |
+
+高级/准备/排障命令仍可直接执行，但不会出现在默认 `-h` 里：
+
+| 命令 | 作用 |
+|---|---|
+| `apply-fast-profile` | **一次性准备**：注入 keystore + `identity_overrides` + 短轮询配置并重启 idps-fw/idps-server |
+| `restore-profile` | 从 `/etc/idd/idps-fw.yaml.fwv-bak` 还原配置并重启 idps-fw |
+| `ensure-keystore [--vin V --dsn D]` | 仅补运行时 keystore（`apply-fast-profile` 已含此步，单独用得少） |
 | `provision <规则文件> [--traffic-cycle N]` | 手动下发一份明文规则（+可选把 fun=4 周期设为 N 秒） |
 | `reset-rules` | 删除已下发的 depot 规则，回退默认 |
 | `health` | 打印 TARGET 的 `idps-fw health` 快照 |
 | `stats` | 打印 TARGET 的 `idps-fw statistics` 快照 |
 
-典型流程：`preflight` →（一次性）`apply-fast-profile` → `list` 看清 case-id → `run <id>` / `run-group <组>` / `run-all` → 完事 `restore-profile` + `reset-rules`（§7）。
+典型流程：`preflight` →（一次性准备时）`apply-fast-profile` → `list` 看清 case-id → `run <id>` / `run-group <组>` / `run-all` → 完事按需 `restore-profile` + `reset-rules`（§7）。
 
 ---
 

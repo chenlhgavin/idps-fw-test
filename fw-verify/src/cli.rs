@@ -5,9 +5,14 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// Two-device WiFi functional test orchestrator for idps-fw.
+/// Functional test orchestrator for idps-fw.
 #[derive(Debug, Parser)]
-#[command(name = "fw-verify", about, version)]
+#[command(
+    name = "fw-verify",
+    about = "Functional test orchestrator for idps-fw.",
+    long_about = None,
+    version
+)]
 pub struct Cli {
     /// Shared connection / runtime options.
     #[command(flatten)]
@@ -51,107 +56,129 @@ pub struct GlobalArgs {
 
     /// Execution mode: `android` (two phones over adb) or `host` (local
     /// veth/netns, rules delivered via the VSOC API).
-    #[arg(long, env = "FWV_MODE", value_enum, default_value_t = Mode::Android)]
+    #[arg(long, env = "FWV_MODE", value_enum, default_value_t = Mode::Android, hide = true)]
     pub mode: Mode,
 
     /// adb serial of the TARGET device (android mode; runs idps-fw + idps-server).
-    #[arg(long, env = "FWV_TARGET")]
+    #[arg(long, env = "FWV_TARGET", hide = true)]
     pub target_serial: Option<String>,
 
     /// adb serial of the PEER device (android mode; traffic source/sink).
-    #[arg(long, env = "FWV_PEER")]
+    #[arg(long, env = "FWV_PEER", hide = true)]
     pub peer_serial: Option<String>,
 
     /// Host mode: network namespace holding the PEER veth end.
-    #[arg(long, env = "FWV_PEER_NETNS", default_value = "fwpeer")]
+    #[arg(long, env = "FWV_PEER_NETNS", default_value = "fwpeer", hide = true)]
     pub peer_netns: String,
 
     /// Host mode: VSOC dashboard client certificate (mTLS) for rule delivery.
-    #[arg(long, env = "FWV_VSOC_CERT")]
+    #[arg(long, env = "FWV_VSOC_CERT", hide = true)]
     pub vsoc_cert: Option<String>,
 
     /// Host mode: VSOC dashboard client key (mTLS) for rule delivery.
-    #[arg(long, env = "FWV_VSOC_KEY")]
+    #[arg(long, env = "FWV_VSOC_KEY", hide = true)]
     pub vsoc_key: Option<String>,
 
     /// Host mode: VSOC dashboard CA certificate (mTLS, optional).
-    #[arg(long, env = "FWV_VSOC_CACERT")]
+    #[arg(long, env = "FWV_VSOC_CACERT", hide = true)]
     pub vsoc_cacert: Option<String>,
 
     /// TARGET network interface.
-    #[arg(long, env = "FWV_TARGET_IFACE", default_value = "wlan0")]
+    #[arg(long, env = "FWV_TARGET_IFACE", default_value = "wlan0", hide = true)]
     pub target_iface: String,
 
     /// PEER network interface.
-    #[arg(long, env = "FWV_PEER_IFACE", default_value = "wlan0")]
+    #[arg(long, env = "FWV_PEER_IFACE", default_value = "wlan0", hide = true)]
     pub peer_iface: String,
 
     /// TARGET IPv4 (auto-detected from the interface when omitted).
-    #[arg(long, env = "FWV_TARGET_IP")]
+    #[arg(long, env = "FWV_TARGET_IP", hide = true)]
     pub target_ip: Option<IpAddr>,
 
     /// PEER IPv4 (auto-detected from the interface when omitted).
-    #[arg(long, env = "FWV_PEER_IP")]
+    #[arg(long, env = "FWV_PEER_IP", hide = true)]
     pub peer_ip: Option<IpAddr>,
 
     /// Access-control domain id.
-    #[arg(long, env = "FWV_ACD", default_value_t = 1)]
+    #[arg(long, env = "FWV_ACD", default_value_t = 1, hide = true)]
     pub acd: i32,
 
     /// Firewall rule function id.
-    #[arg(long, env = "FWV_FUN_FW", default_value_t = 1)]
+    #[arg(long, env = "FWV_FUN_FW", default_value_t = 1, hide = true)]
     pub fun_fw: i32,
 
     /// Traffic policy function id.
-    #[arg(long, env = "FWV_FUN_TRAFFIC", default_value_t = 4)]
+    #[arg(long, env = "FWV_FUN_TRAFFIC", default_value_t = 4, hide = true)]
     pub fun_traffic: i32,
 
     /// Deadline waiting for idps-fw to load a freshly provisioned rule.
-    #[arg(long, env = "FWV_RELOAD_TIMEOUT_SECS", default_value_t = 30)]
+    #[arg(
+        long,
+        env = "FWV_RELOAD_TIMEOUT_SECS",
+        default_value_t = 30,
+        hide = true
+    )]
     pub reload_timeout_secs: u64,
 
     /// Settle time after traffic before reading firewall_event.
-    #[arg(long, env = "FWV_EVENT_SETTLE_MS", default_value_t = 1500)]
+    #[arg(long, env = "FWV_EVENT_SETTLE_MS", default_value_t = 1500, hide = true)]
     pub event_settle_ms: u64,
 
     /// How thoroughly to confirm upload to idps-server.
-    #[arg(long, env = "FWV_REPORT_CONFIRM", value_enum, default_value_t = ReportConfirm::Local)]
+    #[arg(
+        long,
+        env = "FWV_REPORT_CONFIRM",
+        value_enum,
+        default_value_t = ReportConfirm::Local,
+        hide = true
+    )]
     pub report_confirm: ReportConfirm,
 
     /// VSOC dashboard base URL (for `--report-confirm vsoc`).
-    #[arg(long, env = "FWV_VSOC_URL")]
+    #[arg(long, env = "FWV_VSOC_URL", hide = true)]
     pub vsoc_url: Option<String>,
 
     /// fw-agent binary path/name on device.
-    #[arg(long, env = "FWV_FW_AGENT", default_value = "fw-agent")]
+    #[arg(long, env = "FWV_FW_AGENT", default_value = "fw-agent", hide = true)]
     pub fw_agent: String,
 
     /// idps-fw binary path/name on device.
-    #[arg(long, env = "FWV_IDPS_FW", default_value = "idps-fw")]
+    #[arg(long, env = "FWV_IDPS_FW", default_value = "idps-fw", hide = true)]
     pub idps_fw: String,
 
     /// idps-fw SQLite state database path on the TARGET.
     #[arg(
         long,
         env = "FWV_STATE_DB",
-        default_value = "/data/idd/idps-fw/state.sqlite3"
+        default_value = "/data/idd/idps-fw/state.sqlite3",
+        hide = true
     )]
     pub state_db: String,
 
     /// UID used for app/UID-policy and per-app traffic cases.
-    #[arg(long, env = "FWV_APP_UID", default_value_t = 2000)]
+    #[arg(long, env = "FWV_APP_UID", default_value_t = 2000, hide = true)]
     pub app_uid: u32,
 
     /// Identity key mapped to `app_uid` via idps-fw `identity_overrides`.
-    #[arg(long, env = "FWV_APP_IDENTITY_KEY", default_value = "com.demo.browser")]
+    #[arg(
+        long,
+        env = "FWV_APP_IDENTITY_KEY",
+        default_value = "com.demo.browser",
+        hide = true
+    )]
     pub app_identity_key: String,
 
     /// Package name reported for the app/UID identity.
-    #[arg(long, env = "FWV_APP_PKG", default_value = "com.demo.browser")]
+    #[arg(
+        long,
+        env = "FWV_APP_PKG",
+        default_value = "com.demo.browser",
+        hide = true
+    )]
     pub app_pkg: String,
 
     /// App display name reported for the app/UID identity.
-    #[arg(long, env = "FWV_APP_NAME", default_value = "Browser")]
+    #[arg(long, env = "FWV_APP_NAME", default_value = "Browser", hide = true)]
     pub app_name: String,
 
     /// Write the JSON report to this file.
@@ -169,10 +196,13 @@ pub enum Command {
     /// Verify both devices, idps-fw responsiveness, and fw-agent presence.
     Preflight,
     /// Push short-interval config and restart the daemons for fast tests.
+    #[command(hide = true)]
     ApplyFastProfile,
     /// Restore the default daemon config and restart.
+    #[command(hide = true)]
     RestoreProfile,
     /// Create the TARGET keystore if missing so idps-server has a runtime key.
+    #[command(hide = true)]
     EnsureKeystore {
         /// Explicit VIN (defaults to the device identity, then a test VIN).
         #[arg(long)]
@@ -196,6 +226,7 @@ pub enum Command {
     /// Run the entire catalog, batching by bundle.
     RunAll,
     /// Provision a raw firewall rule file (and optional traffic cycle).
+    #[command(hide = true)]
     Provision {
         /// Plaintext firewall rule file to provision.
         rules_file: PathBuf,
@@ -204,9 +235,12 @@ pub enum Command {
         traffic_cycle: Option<u64>,
     },
     /// Restore depot rules to repo defaults by removing provisioned files.
+    #[command(hide = true)]
     ResetRules,
     /// Print the TARGET idps-fw health snapshot.
+    #[command(hide = true)]
     Health,
     /// Print the TARGET idps-fw statistics snapshot.
+    #[command(hide = true)]
     Stats,
 }
