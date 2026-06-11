@@ -3,9 +3,8 @@
 //! In host mode rules reach idps-fw the production way: fw-verify upserts the
 //! firewall rule into VSOC, idps-server cloud-syncs it into its depot, and
 //! idps-fw loads it. The dashboard API is HTTPS with mutual TLS, so we drive
-//! the system `curl` (which also lets us bypass any localhost HTTP proxy) rather
-//! than pull a TLS stack into this otherwise pure-Rust, Windows-cross-compiled
-//! binary.
+//! the system `curl` (which also lets us bypass any localhost HTTP proxy)
+//! rather than pull a second TLS stack into the binary.
 
 use std::process::Command;
 

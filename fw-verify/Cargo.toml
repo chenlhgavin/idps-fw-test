@@ -3,13 +3,23 @@ name = "fw-verify"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.93"
-description = "Host-side orchestrator for idps-fw two-device WiFi functional tests. Runs on a controller PC (incl. Windows), drives both Android phones over adb and the on-device fw-agent worker, and asserts both enforcement (drop/allow) and detection (firewall_event + upload to idps-server). Pure Rust, no native dependencies."
+description = "Single-binary functional-test tool for idps-fw. Runs locally on the device under test (host or Android): it sets up a veth/netns peer, provisions firewall rules (directly into the depot on Android, via the VSOC API on host), generates traffic, and asserts enforcement, detection, and upload to idps-server."
 
 [dependencies]
+# Internal crates (path deps via repo sync) — reused for byte-exact depot
+# encryption and the same VIN/DSN keystore derivation idps-server uses.
+idps-core = { path = "../../idps-base/crates/idps-core" }
+idps-server = { path = "../../idps-server" }
+
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+socket2 = { version = "0.5", features = ["all"] }
+# AF_PACKET raw ARP frames + SIOCGIFHWADDR for the ARP-spoof monitor (event 303),
+# and credential dropping (setgroups/setgid/setuid) for app/UID-policy cases.
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

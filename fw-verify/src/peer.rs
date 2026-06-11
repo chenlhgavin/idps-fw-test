@@ -1,4 +1,8 @@
-//! Driving the on-device fw-agent: traffic generation and listeners.
+//! Driving the worker: traffic generation and listeners.
+//!
+//! The work runs as a re-executed `fw-verify agent <sub>` on the relevant side
+//! (the PEER inside its netns, or the TARGET locally), optionally under a
+//! dropped uid for app/UID-policy cases.
 
 use std::net::IpAddr;
 use std::process::Child;
@@ -9,9 +13,9 @@ use serde::Deserialize;
 use crate::config::RunConfig;
 use crate::exec::Endpoint;
 
-/// Parsed result of a `fw-agent traffic` run.
+/// Parsed result of an `agent traffic` run.
 ///
-/// The per-outcome counts mirror the fw-agent JSON schema and are retained for
+/// The per-outcome counts mirror the agent JSON schema and are retained for
 /// diagnostics even though the orchestrator decides on `verdict` alone.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -31,7 +35,7 @@ pub struct TrafficOutcome {
     pub other: u32,
 }
 
-/// A traffic request to hand to `fw-agent`.
+/// A traffic request to hand to the worker.
 #[derive(Debug, Clone)]
 pub struct TrafficCmd {
     pub proto: &'static str,
@@ -48,69 +52,88 @@ pub struct TrafficCmd {
 }
 
 impl TrafficCmd {
-    fn render(&self, cfg: &RunConfig) -> String {
-        let mut cmd = format!("{} traffic {} --to {}", cfg.fw_agent, self.proto, self.to);
+    /// Build the `agent traffic ...` argv (uid appended when dropping privilege).
+    fn argv(&self, uid: Option<u32>) -> Vec<String> {
+        let mut argv = vec![
+            "traffic".to_string(),
+            self.proto.to_string(),
+            "--to".to_string(),
+            self.to.to_string(),
+        ];
         if let Some(ports) = &self.dports {
             let joined = ports
                 .iter()
                 .map(u16::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            cmd.push_str(&format!(" --dports {joined}"));
+            argv.push("--dports".to_string());
+            argv.push(joined);
         } else if let Some(port) = self.dport {
-            cmd.push_str(&format!(" --dport {port}"));
+            argv.push("--dport".to_string());
+            argv.push(port.to_string());
         }
         if let Some(sport) = self.sport {
-            cmd.push_str(&format!(" --sport {sport}"));
+            argv.push("--sport".to_string());
+            argv.push(sport.to_string());
         }
         if self.count > 1 {
-            cmd.push_str(&format!(" --count {}", self.count));
+            argv.push("--count".to_string());
+            argv.push(self.count.to_string());
         }
         if self.interval_ms > 0 {
-            cmd.push_str(&format!(" --interval-ms {}", self.interval_ms));
+            argv.push("--interval-ms".to_string());
+            argv.push(self.interval_ms.to_string());
         }
-        cmd.push_str(&format!(" --timeout-ms {}", self.timeout_ms));
+        argv.push("--timeout-ms".to_string());
+        argv.push(self.timeout_ms.to_string());
         if self.await_reply {
-            cmd.push_str(" --await-reply");
+            argv.push("--await-reply".to_string());
         }
         if self.fin_only {
-            cmd.push_str(" --fin-only");
+            argv.push("--fin-only".to_string());
         }
         if self.icmp_timestamp {
-            cmd.push_str(" --icmp-type timestamp");
+            argv.push("--icmp-type".to_string());
+            argv.push("timestamp".to_string());
         }
-        cmd
+        if let Some(uid) = uid {
+            argv.push("--uid".to_string());
+            argv.push(uid.to_string());
+        }
+        argv
     }
 }
 
 /// Generate traffic from `endpoint`, optionally as a specific UID.
 pub fn traffic(
     endpoint: &Endpoint,
-    cfg: &RunConfig,
+    _cfg: &RunConfig,
     cmd: &TrafficCmd,
     uid: Option<u32>,
 ) -> Result<TrafficOutcome> {
-    let inner = cmd.render(cfg);
-    let value = endpoint.shell_json_as(uid, &inner)?;
+    let value = endpoint.agent_json(&cmd.argv(uid))?;
     serde_json::from_value(value).context("failed to parse traffic outcome")
 }
 
 /// Start a background listener on `endpoint`. Returns the local child.
 pub fn start_listener(
     endpoint: &Endpoint,
-    cfg: &RunConfig,
+    _cfg: &RunConfig,
     proto: &str,
     port: u16,
     duration_secs: u64,
 ) -> Result<Child> {
-    let cmd = format!(
-        "{} listen {proto} --port {port} --duration-secs {duration_secs}",
-        cfg.fw_agent
-    );
-    endpoint.spawn_shell(&cmd)
+    endpoint.agent_spawn(&[
+        "listen".to_string(),
+        proto.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--duration-secs".to_string(),
+        duration_secs.to_string(),
+    ])
 }
 
-/// Best-effort teardown of any lingering fw-agent listeners on `endpoint`.
-pub fn stop_listeners(endpoint: &Endpoint, cfg: &RunConfig) {
-    let _ = endpoint.shell(&format!("pkill -f '{} listen'", cfg.fw_agent));
+/// Best-effort teardown of any lingering agent listeners on `endpoint`.
+pub fn stop_listeners(endpoint: &Endpoint, _cfg: &RunConfig) {
+    let _ = endpoint.shell("pkill -f 'agent listen'");
 }

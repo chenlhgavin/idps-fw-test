@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::json;
 
-use crate::cli::ConnFloodArgs;
+use crate::agent::cli::ConnFloodArgs;
 
 pub fn run(args: &ConnFloodArgs) -> Result<()> {
     let dst = SocketAddr::new(args.to, args.dport);

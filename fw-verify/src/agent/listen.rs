@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::cli::{ListenArgs, ListenProto};
+use crate::agent::cli::{ListenArgs, ListenProto};
 
 const POLL: Duration = Duration::from_millis(100);
 

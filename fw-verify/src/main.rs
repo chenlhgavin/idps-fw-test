@@ -1,15 +1,17 @@
-//! `fw-verify` — host-side orchestrator for idps-fw two-device WiFi tests.
+//! `fw-verify` — single-binary functional test tool for idps-fw.
 //!
-//! Runs on a controller PC (including Windows), drives both Android phones over
-//! adb and the on-device `fw-agent`, provisions firewall rules into the depot,
-//! and asserts enforcement, detection, and upload to idps-server.
+//! Runs locally on the device under test (host or Android) as root. It stages a
+//! veth/netns peer, provisions firewall rules (directly into the depot on
+//! Android, through the VSOC API on host), generates traffic, and asserts
+//! enforcement, detection, and upload to idps-server. The same binary also acts
+//! as the in-namespace / uid-dropped worker via the hidden `agent` subcommand.
 
-mod adb;
+mod agent;
 mod catalog;
 mod cli;
 mod config;
+mod env;
 mod exec;
-mod fastprofile;
 mod monitor;
 mod peer;
 mod provision;
@@ -44,8 +46,6 @@ fn main() -> ExitCode {
 fn config_key_to_env(key: &str) -> Option<&'static str> {
     Some(match key {
         "mode" => "FWV_MODE",
-        "target_serial" | "target" => "FWV_TARGET",
-        "peer_serial" | "peer" => "FWV_PEER",
         "peer_netns" => "FWV_PEER_NETNS",
         "vsoc_cert" => "FWV_VSOC_CERT",
         "vsoc_key" => "FWV_VSOC_KEY",
@@ -54,6 +54,7 @@ fn config_key_to_env(key: &str) -> Option<&'static str> {
         "peer_iface" => "FWV_PEER_IFACE",
         "target_ip" => "FWV_TARGET_IP",
         "peer_ip" => "FWV_PEER_IP",
+        "veth_prefix" => "FWV_VETH_PREFIX",
         "acd" => "FWV_ACD",
         "fun_fw" => "FWV_FUN_FW",
         "fun_traffic" => "FWV_FUN_TRAFFIC",
@@ -61,7 +62,6 @@ fn config_key_to_env(key: &str) -> Option<&'static str> {
         "event_settle_ms" => "FWV_EVENT_SETTLE_MS",
         "report_confirm" => "FWV_REPORT_CONFIRM",
         "vsoc_url" => "FWV_VSOC_URL",
-        "fw_agent" => "FWV_FW_AGENT",
         "idps_fw" => "FWV_IDPS_FW",
         "state_db" => "FWV_STATE_DB",
         "app_uid" => "FWV_APP_UID",
@@ -116,6 +116,18 @@ fn apply_config_env() {
 /// Returns the number of failed cases (0 for non-run subcommands).
 fn run(cli: Cli) -> Result<usize> {
     match cli.command {
+        Command::Agent(command) => {
+            agent::dispatch(command)?;
+            Ok(0)
+        }
+        Command::SetupEnv => {
+            env::setup(&cli.global)?;
+            Ok(0)
+        }
+        Command::CleanEnv => {
+            env::clean(&cli.global)?;
+            Ok(0)
+        }
         Command::List => {
             list();
             Ok(0)
@@ -123,21 +135,6 @@ fn run(cli: Cli) -> Result<usize> {
         Command::Preflight => {
             let cfg = RunConfig::resolve(&cli.global)?;
             preflight(&cfg)?;
-            Ok(0)
-        }
-        Command::ApplyFastProfile => {
-            let cfg = RunConfig::resolve(&cli.global)?;
-            fastprofile::apply(&cfg)?;
-            Ok(0)
-        }
-        Command::RestoreProfile => {
-            let cfg = RunConfig::resolve(&cli.global)?;
-            fastprofile::restore(&cfg)?;
-            Ok(0)
-        }
-        Command::EnsureKeystore { vin, dsn } => {
-            let cfg = RunConfig::resolve(&cli.global)?;
-            fastprofile::ensure_keystore(&cfg, vin.as_deref(), dsn.as_deref())?;
             Ok(0)
         }
         Command::Health => {
@@ -171,7 +168,7 @@ fn run(cli: Cli) -> Result<usize> {
         Command::ResetRules => {
             let cfg = RunConfig::resolve(&cli.global)?;
             provision::reset_rules(&cfg)?;
-            println!("removed provisioned depot rules");
+            println!("reset depot rules to a permissive baseline");
             Ok(0)
         }
         Command::Run { id } => {
@@ -230,20 +227,7 @@ fn list() {
 fn preflight(cfg: &RunConfig) -> Result<()> {
     let mut checks: Vec<(String, bool, String)> = Vec::new();
 
-    for (role, endpoint) in [("target", &cfg.target), ("peer", &cfg.peer)] {
-        let _ = endpoint.root();
-        let state = endpoint
-            .get_state()
-            .unwrap_or_else(|_| "unknown".to_string());
-        checks.push((format!("{role} reachable"), state == "device", state));
-        let now = endpoint.shell_json(&format!("{} now", cfg.fw_agent));
-        let info = match &now {
-            Ok(_) => "responds".to_string(),
-            Err(error) => format!("{error:#}"),
-        };
-        checks.push((format!("{role} fw-agent"), now.is_ok(), info));
-    }
-
+    // idps-fw is up and answering on the TARGET.
     let health = target::health(cfg);
     let health_info = match &health {
         Ok(h) => format!(
@@ -254,25 +238,39 @@ fn preflight(cfg: &RunConfig) -> Result<()> {
     };
     checks.push(("idps-fw health".to_string(), health.is_ok(), health_info));
 
+    // Depot directory the rules land in.
     let depot = cfg
         .target
         .shell("[ -d /data/idd/rule/depot ] && echo yes || echo no")
         .unwrap_or_default();
     checks.push(("target depot dir".to_string(), depot.contains("yes"), depot));
 
+    // The PEER worker re-exec path (netns entry + self re-exec) works.
+    let peer_worker = cfg.peer.agent_json(&["now".to_string()]);
+    checks.push((
+        "peer worker re-exec".to_string(),
+        peer_worker.is_ok(),
+        match &peer_worker {
+            Ok(_) => "responds".to_string(),
+            Err(error) => format!("{error:#}"),
+        },
+    ));
+
+    // PEER can reach the TARGET over the veth.
+    let reachable = cfg
+        .peer
+        .shell(&format!(
+            "ping -c1 -W2 {} >/dev/null 2>&1 && echo ok",
+            cfg.target_ip
+        ))
+        .unwrap_or_default();
+    checks.push((
+        "peer->target link".to_string(),
+        reachable.contains("ok"),
+        reachable,
+    ));
+
     if cfg.mode == cli::Mode::Host {
-        let reachable = cfg
-            .peer
-            .shell(&format!(
-                "ping -c1 -W2 {} >/dev/null && echo ok",
-                cfg.target_ip
-            ))
-            .unwrap_or_default();
-        checks.push((
-            "peer->target link".to_string(),
-            reachable.contains("ok"),
-            reachable,
-        ));
         let vsoc_ok = vsoc::events_mention(cfg, "").is_ok();
         checks.push((
             "vsoc api".to_string(),
@@ -287,8 +285,8 @@ fn preflight(cfg: &RunConfig) -> Result<()> {
         all_ok &= *pass;
     }
 
-    // Keystore is advisory: in android mode `ensure-keystore` creates it; in
-    // host mode idps-server derives it at startup from the mock VIN/DSN.
+    // Keystore is advisory: setup-env injects it on Android; idps-server derives
+    // it at startup on host from the mock VIN/DSN.
     let keystore = cfg
         .target
         .shell("[ -e /data/idd/keys/aes.keystore ] && echo yes || echo no")
@@ -303,7 +301,8 @@ fn preflight(cfg: &RunConfig) -> Result<()> {
         keystore
     );
     println!(
-        "\nTARGET={} ({})  PEER={} ({})",
+        "\nmode={:?}  TARGET={} ({})  PEER={} ({})",
+        cfg.mode,
         cfg.target.label(),
         cfg.target_ip,
         cfg.peer.label(),

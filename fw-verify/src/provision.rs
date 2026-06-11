@@ -1,31 +1,40 @@
 //! Rule provisioning.
 //!
-//! Android mode writes the encrypted depot directly via `fw-agent` and waits
-//! for idps-fw to load it. Host mode delivers rules the production way: upsert
-//! into VSOC, let idps-server cloud-sync them into its depot, and wait for
-//! idps-fw to pick up the new version.
+//! Android mode writes the encrypted depot directly (reusing idps-server's
+//! `RuleDepot`) and waits for idps-fw to load it. Host mode delivers rules the
+//! production way: upsert into VSOC, let idps-server cloud-sync them into its
+//! depot, and wait for idps-fw to pick up the new version.
 
+use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+use crate::agent::provision::{provision_rule, DEFAULT_CONFIG, DEFAULT_KEYSTORE};
 use crate::cli::Mode;
 use crate::config::RunConfig;
 use crate::target;
 use crate::vsoc;
 
-const REMOTE_RULE_PATH: &str = "/data/local/tmp/fw-verify-rule.txt";
 const DEFAULT_DEPOT: &str = "/data/idd/rule/depot";
 const POLL: Duration = Duration::from_millis(1000);
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
-fn push_text(cfg: &RunConfig, text: &str) -> Result<()> {
-    let mut tmp = std::env::temp_dir();
-    tmp.push("fw-verify-rule.txt");
-    std::fs::write(&tmp, text).context("failed to write local rule file")?;
-    cfg.target.push(&tmp, REMOTE_RULE_PATH)
+/// Encrypt a rule into the depot in-process (Android mode, on the TARGET).
+fn write_depot_rule(cfg: &RunConfig, fun: i32, ver: i64, rule_text: &str) -> Result<()> {
+    let out = provision_rule(
+        cfg.acd,
+        fun,
+        1,
+        Some(ver as i32),
+        rule_text.as_bytes(),
+        Path::new(DEFAULT_CONFIG),
+        Path::new(DEFAULT_KEYSTORE),
+    )
+    .context("failed to write depot rule")?;
+    require_key_present(&out)
 }
 
 /// Provision the firewall rule set (fun=fw) and block until idps-fw loads it.
@@ -36,24 +45,15 @@ pub fn provision_firewall(cfg: &RunConfig, rule_text: &str) -> Result<i64> {
     }
 }
 
-/// Android: encrypt into the depot via fw-agent, then wait for the load.
+/// Android: encrypt into the depot in-process, then wait for the load.
 ///
 /// The version is forced to `current + 1` so `firewall_rule_ver` strictly
 /// increases even when a higher-versioned rule was loaded before.
 fn provision_firewall_android(cfg: &RunConfig, rule_text: &str) -> Result<i64> {
     let before = target::firewall_rule_ver(cfg).unwrap_or(-1);
     let target_ver = before.max(0) + 1;
-    eprintln!("fw-verify: provisioning firewall rule via fw-agent (target_ver={target_ver})");
-    push_text(cfg, rule_text)?;
-    let cmd = format!(
-        "{} provision-rule --acd {} --fun {} --ver {target_ver} --input {REMOTE_RULE_PATH}",
-        cfg.fw_agent, cfg.acd, cfg.fun_fw
-    );
-    let out = cfg
-        .target
-        .shell_json(&cmd)
-        .context("fw-agent provision-rule (firewall) failed")?;
-    require_key_present(&out)?;
+    eprintln!("fw-verify: provisioning firewall rule into the depot (target_ver={target_ver})");
+    write_depot_rule(cfg, cfg.fun_fw, target_ver, rule_text)?;
     wait_for(cfg, "firewall_rule_ver", target_ver)?;
     Ok(target_ver)
 }
@@ -88,18 +88,14 @@ fn write_traffic_rule_android(cfg: &RunConfig, cycle: u64) -> Result<()> {
         .unwrap_or(-1);
     let target_ver = before.max(0) + 1;
     eprintln!(
-        "fw-verify: provisioning traffic policy via fw-agent (cycle={cycle}s target_ver={target_ver})"
+        "fw-verify: provisioning traffic policy into the depot (cycle={cycle}s target_ver={target_ver})"
     );
-    push_text(cfg, &format!("{{\"cycle\":{cycle}}}"))?;
-    let cmd = format!(
-        "{} provision-rule --acd {} --fun {} --ver {target_ver} --input {REMOTE_RULE_PATH}",
-        cfg.fw_agent, cfg.acd, cfg.fun_traffic
-    );
-    let out = cfg
-        .target
-        .shell_json(&cmd)
-        .context("fw-agent provision-rule (traffic) failed")?;
-    require_key_present(&out)
+    write_depot_rule(
+        cfg,
+        cfg.fun_traffic,
+        target_ver,
+        &format!("{{\"cycle\":{cycle}}}"),
+    )
 }
 
 /// Provision the traffic policy (fun=traffic) cycle and wait for it to load.
@@ -211,7 +207,6 @@ pub fn reset_rules(cfg: &RunConfig) -> Result<()> {
             let _ = cfg
                 .target
                 .shell(&format!("rm -f {pattern} {pattern_traffic}"))?;
-            let _ = cfg.target.shell(&format!("rm -f {REMOTE_RULE_PATH}"));
             Ok(())
         }
         Mode::Host => {

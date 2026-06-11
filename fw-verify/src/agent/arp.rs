@@ -16,7 +16,7 @@ const ETH_P_ARP: u16 = 0x0806;
 const ARPHRD_ETHER: u16 = 1;
 const ARPOP_REPLY: u16 = 2;
 
-pub fn run(args: &crate::cli::ArpSpoofArgs) -> Result<()> {
+pub fn run(args: &crate::agent::cli::ArpSpoofArgs) -> Result<()> {
     let iface = CString::new(args.iface.as_str()).context("invalid interface name")?;
     // SAFETY: if_nametoindex reads a NUL-terminated name and returns 0 on error.
     let ifindex = unsafe { libc::if_nametoindex(iface.as_ptr()) };
@@ -89,7 +89,12 @@ fn interface_mac(iface: &str) -> Result<[u8; 6]> {
         *slot = byte as libc::c_char;
     }
     let mut hw: MaybeUninit<libc::ifreq> = MaybeUninit::new(req);
-    let ret = unsafe { libc::ioctl(fd, libc::SIOCGIFHWADDR, hw.as_mut_ptr()) };
+    // The ioctl request type differs across libc targets (c_ulong on glibc,
+    // c_int on Android bionic), so cast to the platform's `Ioctl` alias. The
+    // cast is a no-op on glibc, hence the allow.
+    #[allow(clippy::unnecessary_cast)]
+    let ret =
+        unsafe { libc::ioctl(fd, libc::SIOCGIFHWADDR as libc::Ioctl, hw.as_mut_ptr()) };
     unsafe { libc::close(fd) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error()).context("SIOCGIFHWADDR failed");

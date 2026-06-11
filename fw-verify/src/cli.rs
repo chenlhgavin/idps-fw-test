@@ -1,15 +1,17 @@
-//! Command line surface for the fw-verify orchestrator.
+//! Command line surface for the fw-verify tool.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// Functional test orchestrator for idps-fw.
+use crate::agent::cli::AgentCommand;
+
+/// Single-binary functional test tool for idps-fw.
 #[derive(Debug, Parser)]
 #[command(
     name = "fw-verify",
-    about = "Functional test orchestrator for idps-fw.",
+    about = "Functional test tool for idps-fw (runs on the device under test).",
     long_about = None,
     version
 )]
@@ -34,12 +36,12 @@ pub enum ReportConfirm {
     Vsoc,
 }
 
-/// Where the workers run and how rules are delivered.
+/// How firewall rules are delivered to idps-fw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Mode {
-    /// Two Android phones over adb; rules written directly into the depot.
+    /// Write the encrypted depot directly (Android device under test).
     Android,
-    /// Local host with a veth/netns peer; rules delivered through the VSOC API.
+    /// Deliver rules through the VSOC dashboard API (host).
     Host,
 }
 
@@ -54,20 +56,12 @@ pub struct GlobalArgs {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Execution mode: `android` (two phones over adb) or `host` (local
-    /// veth/netns, rules delivered via the VSOC API).
-    #[arg(long, env = "FWV_MODE", value_enum, default_value_t = Mode::Android, hide = true)]
+    /// Rule delivery: `host` (via the VSOC API) or `android` (write the depot
+    /// directly). Topology and execution are identical; only this differs.
+    #[arg(long, env = "FWV_MODE", value_enum, default_value_t = Mode::Host, global = true)]
     pub mode: Mode,
 
-    /// adb serial of the TARGET device (android mode; runs idps-fw + idps-server).
-    #[arg(long, env = "FWV_TARGET", hide = true)]
-    pub target_serial: Option<String>,
-
-    /// adb serial of the PEER device (android mode; traffic source/sink).
-    #[arg(long, env = "FWV_PEER", hide = true)]
-    pub peer_serial: Option<String>,
-
-    /// Host mode: network namespace holding the PEER veth end.
+    /// Network namespace holding the PEER veth end.
     #[arg(long, env = "FWV_PEER_NETNS", default_value = "fwpeer", hide = true)]
     pub peer_netns: String,
 
@@ -83,12 +77,12 @@ pub struct GlobalArgs {
     #[arg(long, env = "FWV_VSOC_CACERT", hide = true)]
     pub vsoc_cacert: Option<String>,
 
-    /// TARGET network interface.
-    #[arg(long, env = "FWV_TARGET_IFACE", default_value = "wlan0", hide = true)]
+    /// TARGET network interface (the idps-fw-monitored veth end).
+    #[arg(long, env = "FWV_TARGET_IFACE", default_value = "fwt0", hide = true)]
     pub target_iface: String,
 
-    /// PEER network interface.
-    #[arg(long, env = "FWV_PEER_IFACE", default_value = "wlan0", hide = true)]
+    /// PEER network interface (the veth end inside the namespace).
+    #[arg(long, env = "FWV_PEER_IFACE", default_value = "fwp0", hide = true)]
     pub peer_iface: String,
 
     /// TARGET IPv4 (auto-detected from the interface when omitted).
@@ -98,6 +92,10 @@ pub struct GlobalArgs {
     /// PEER IPv4 (auto-detected from the interface when omitted).
     #[arg(long, env = "FWV_PEER_IP", hide = true)]
     pub peer_ip: Option<IpAddr>,
+
+    /// `/24` network prefix length used when staging the veth topology.
+    #[arg(long, env = "FWV_VETH_PREFIX", default_value_t = 24, hide = true)]
+    pub veth_prefix: u8,
 
     /// Access-control domain id.
     #[arg(long, env = "FWV_ACD", default_value_t = 1, hide = true)]
@@ -138,11 +136,7 @@ pub struct GlobalArgs {
     #[arg(long, env = "FWV_VSOC_URL", hide = true)]
     pub vsoc_url: Option<String>,
 
-    /// fw-agent binary path/name on device.
-    #[arg(long, env = "FWV_FW_AGENT", default_value = "fw-agent", hide = true)]
-    pub fw_agent: String,
-
-    /// idps-fw binary path/name on device.
+    /// idps-fw binary path/name on the device.
     #[arg(long, env = "FWV_IDPS_FW", default_value = "idps-fw", hide = true)]
     pub idps_fw: String,
 
@@ -193,24 +187,12 @@ pub struct GlobalArgs {
 /// Supported subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Verify both devices, idps-fw responsiveness, and fw-agent presence.
+    /// Stage the veth/netns topology and write the idps-fw + fw-verify configs.
+    SetupEnv,
+    /// Tear down the topology, restore the idps-fw config, remove generated files.
+    CleanEnv,
+    /// Verify the topology, idps-fw responsiveness, and rule delivery path.
     Preflight,
-    /// Push short-interval config and restart the daemons for fast tests.
-    #[command(hide = true)]
-    ApplyFastProfile,
-    /// Restore the default daemon config and restart.
-    #[command(hide = true)]
-    RestoreProfile,
-    /// Create the TARGET keystore if missing so idps-server has a runtime key.
-    #[command(hide = true)]
-    EnsureKeystore {
-        /// Explicit VIN (defaults to the device identity, then a test VIN).
-        #[arg(long)]
-        vin: Option<String>,
-        /// Explicit DSN (defaults to the device identity, then a test DSN).
-        #[arg(long)]
-        dsn: Option<String>,
-    },
     /// List the case catalog.
     List,
     /// Run one case by id.
@@ -243,4 +225,7 @@ pub enum Command {
     /// Print the TARGET idps-fw statistics snapshot.
     #[command(hide = true)]
     Stats,
+    /// Hidden self-invoked worker (traffic/listener/depot/event queries).
+    #[command(hide = true, subcommand)]
+    Agent(AgentCommand),
 }

@@ -6,45 +6,48 @@
 
 ## Repo Role
 
-- `idps-fw-test` is the firewall functional-test toolset for `idps-fw`. It holds two crates:
-  - `fw-verify/` — host-side orchestrator (pure Rust, runs on Linux and Windows). Drives both
-    Android phones over `adb` and the on-device `fw-agent` worker, then asserts both
-    enforcement (drop/allow) and detection (`firewall_event` + upload to idps-server).
-  - `fw-agent/` — on-device worker, cross-built to `aarch64-linux-android`. Writes encrypted
-    rule depot files (reusing `idps-server`'s `RuleDepot` + the same VIN/DSN keystore
-    derivation), generates OS-socket traffic, and reads `idps-fw` SQLite state.
-- `fw-agent` reuses `idps-core` + `idps-server` via Cargo path deps
-  (`../../idps-base/crates/idps-core`, `../../idps-server`). These resolve only when this repo
-  sits at the workspace root next to `idps-base`/`idps-server` — **keep `fw-agent/` and
-  `fw-verify/` as direct children of the repo root; do not nest them under a `crates/` dir.**
+- `idps-fw-test` is the functional-test tool for `idps-fw`. It is a single crate:
+  - `fw-verify/` — one binary that is both the orchestrator and the on-device/in-namespace
+    worker. It runs locally on the device under test (host or Android), stages a veth/netns
+    topology, provisions firewall rules, generates OS-socket traffic, reads `idps-fw` SQLite
+    state, and asserts enforcement (drop/allow) and detection (`firewall_event` + upload to
+    idps-server). The hidden `fw-verify agent <sub>` subcommand is the worker the binary
+    re-executes for namespace/uid-dropped/background work; agent code lives under
+    `fw-verify/src/agent/`.
+- `fw-verify` reuses `idps-core` + `idps-server` via Cargo path deps
+  (`../../idps-base/crates/idps-core`, `../../idps-server`) for byte-exact depot encryption.
+  These resolve only when this repo sits at the workspace root next to `idps-base`/`idps-server`
+  — **keep `fw-verify/` a direct child of the repo root; do not nest it under a `crates/` dir.**
+- The **only** mode difference is rule delivery: `--mode host` upserts through the VSOC API;
+  `--mode android` writes the depot directly. Topology and execution are identical.
 
 ## Preferred Workflow
 
 - For `idps-fw-test`-only work, prefer the local [Makefile](/home/ubuntu/workspace/idps/idps-fw-test/Makefile).
 - Common local entrypoints (same command set as `idps-fw/Makefile`):
-  - `make check` — host fmt-check + clippy + test for both crates
-  - `make build` / `make release` `[platform=host|android]` — host builds both crates;
-    `platform=android` cross-builds `fw-agent` only
-  - `make release-fwverify-windows` — cross-build `fw-verify.exe` for the controller PC
-  - `make push-fwagent DEVICE=<serial>` — install `/system/bin/fw-agent` on a phone
+  - `make check` — host fmt-check + clippy + test
+  - `make build` / `make release` `[platform=host|android]` — host build, or cross-build for
+    the device
+  - `make push-fwverify DEVICE=<serial>` — install `/system/bin/fw-verify` on a phone
   - `make package-android` — assemble the Android payload (`system.zip`) + `install.bat` +
-    `fw-verify.exe` + `fw-verify.conf` + a distributable zip
-  - `make install` — host-only: install `fw-verify` + `fw-agent` to `/usr/local/bin`
+    `fw-verify.conf` + a distributable zip (adb installs the binary only; tests run on-device)
+  - `make install` — host-only: install `fw-verify` to `/usr/local/bin`
+  - `make setup-dev` / `make clean-dev` — wrappers over `fw-verify setup-env` / `clean-env`
   - `make clean`
 - If you invoke Cargo directly, use the repo toolchain explicitly:
   - `rustup run 1.93.0 cargo test --all-features`
   - `rustup run 1.93.0 cargo clippy --all-features -- -D warnings`
 - `fmt` uses nightly: `cargo +nightly fmt`.
+- New crates pulled in via the `idps-base` deps require pinning `serde_yml`:
+  `cargo update -p serde_yml --precise 0.0.12` (0.0.13 breaks the idps-core build).
 
 ## Build Prerequisites
 
-- The `fw-agent` Android cross-build needs a working NDK (`ANDROID_NDK_HOME`, currently
+- The Android cross-build needs a working NDK (`ANDROID_NDK_HOME`, currently
   `aarch64-linux-android`) and the device-provider Android shared library. The Makefile's
   `ensure-device-provider-android` target builds the latter on demand by invoking the
   **workspace-root** Makefile (`make -C .. build-device-provider platform=android
   DEVICE_PROVIDER=mock`), so this repo must live inside the `repo` workspace.
-- `make release-fwverify-windows` needs `rustup target add --toolchain 1.93.0
-  x86_64-pc-windows-gnu` and the `mingw-w64` toolchain.
 
 ## Boundaries
 

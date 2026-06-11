@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
 
-use crate::cli::{IcmpKind, Proto, TrafficArgs};
+use crate::agent::cli::{IcmpKind, Proto, TrafficArgs};
 
 /// Result of a single attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,6 +307,9 @@ fn fin_attempt(dst: SocketAddr, sport: Option<u16>, seq: u32) -> Result<Outcome>
 }
 
 pub fn run(args: &TrafficArgs) -> Result<()> {
+    if let Some(uid) = args.uid {
+        crate::agent::drop_to_uid(uid)?;
+    }
     let timeout = Duration::from_millis(args.timeout_ms);
     let interval = Duration::from_millis(args.interval_ms);
 

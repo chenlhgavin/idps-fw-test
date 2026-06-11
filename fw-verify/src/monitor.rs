@@ -8,7 +8,8 @@
 //!
 //! These run under a permissive (allow-all) firewall rule so the connection
 //! flood can establish; ICMP-timestamp and ARP detection are independent of the
-//! tuple filter. They share the host/adb endpoint and VSOC provisioning paths.
+//! tuple filter. They share the same endpoint and provisioning paths as the
+//! data-plane cases.
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -220,11 +221,15 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         "fw-verify: monitor case {} starting held listener on port {FLOOD_PORT}",
         case.id
     );
-    let listener = match cfg.target.spawn_shell(&format!(
-        "{} listen tcp --port {FLOOD_PORT} --duration-secs {} --hold",
-        cfg.fw_agent,
-        HOLD_SECS + 6
-    )) {
+    let listener = match cfg.target.agent_spawn(&[
+        "listen".to_string(),
+        "tcp".to_string(),
+        "--port".to_string(),
+        FLOOD_PORT.to_string(),
+        "--duration-secs".to_string(),
+        (HOLD_SECS + 6).to_string(),
+        "--hold".to_string(),
+    ]) {
         Ok(child) => child,
         Err(error) => return result(case, "FAIL", "none", format!("listener failed: {error:#}")),
     };
@@ -233,10 +238,17 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         "fw-verify: monitor case {} opening {CONN_FLOOD_COUNT} held TCP connections",
         case.id
     );
-    let flood = cfg.peer.spawn_shell(&format!(
-        "{} conn-flood --to {} --dport {FLOOD_PORT} --count {CONN_FLOOD_COUNT} --hold-secs {HOLD_SECS}",
-        cfg.fw_agent, cfg.target_ip
-    ));
+    let flood = cfg.peer.agent_spawn(&[
+        "conn-flood".to_string(),
+        "--to".to_string(),
+        cfg.target_ip.to_string(),
+        "--dport".to_string(),
+        FLOOD_PORT.to_string(),
+        "--count".to_string(),
+        CONN_FLOOD_COUNT.to_string(),
+        "--hold-secs".to_string(),
+        HOLD_SECS.to_string(),
+    ]);
     let mut flood = match flood {
         Ok(child) => child,
         Err(error) => {
@@ -324,11 +336,16 @@ fn run_arp_spoof(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", "none", format!("watermark failed: {error:#}")),
     };
-    let cmd = format!(
-        "{} arp-spoof --iface {} --claim-ip {ARP_CLAIM_IP} --count 6",
-        cfg.fw_agent, cfg.peer_iface
-    );
-    if let Err(error) = cfg.peer.shell_json(&cmd) {
+    let arp = cfg.peer.agent_json(&[
+        "arp-spoof".to_string(),
+        "--iface".to_string(),
+        cfg.peer_iface.clone(),
+        "--claim-ip".to_string(),
+        ARP_CLAIM_IP.to_string(),
+        "--count".to_string(),
+        "6".to_string(),
+    ]);
+    if let Err(error) = arp {
         return result(case, "FAIL", "none", format!("arp-spoof failed: {error:#}"));
     }
     eprintln!(

@@ -38,8 +38,9 @@ pub fn emit(global: &GlobalArgs, cfg: &RunConfig, results: &[CaseResult]) -> Res
     );
 
     let document = json!({
-        "target": cfg.target_serial,
-        "peer": cfg.peer_serial,
+        "mode": format!("{:?}", cfg.mode).to_lowercase(),
+        "target": cfg.target.label(),
+        "peer": cfg.peer.label(),
         "target_ip": cfg.target_ip.to_string(),
         "peer_ip": cfg.peer_ip.to_string(),
         "cases": results,

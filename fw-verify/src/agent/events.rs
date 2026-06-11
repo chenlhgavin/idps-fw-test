@@ -6,15 +6,19 @@
 //! enum names. The database is opened read-write (without create) because an
 //! idps-fw WAL database cannot always be opened strictly read-only.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
-use crate::cli::{EventQueryArgs, ReportQueryArgs};
+use crate::agent::cli::{EventQueryArgs, ReportQueryArgs};
 
-fn open_db(args: &EventQueryArgs) -> Result<Connection> {
-    Connection::open_with_flags(&args.db, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .with_context(|| format!("failed to open idps-fw state db {}", args.db.display()))
+/// Open the idps-fw state db read-write (without create) — an idps-fw WAL
+/// database cannot always be opened strictly read-only.
+fn open_db(db: &Path) -> Result<Connection> {
+    Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .with_context(|| format!("failed to open idps-fw state db {}", db.display()))
 }
 
 /// Strip the surrounding JSON quotes from a stored enum column.
@@ -34,8 +38,10 @@ mod tests {
     }
 }
 
-pub fn dump_events(args: &EventQueryArgs) -> Result<()> {
-    let connection = open_db(args)?;
+/// Query `firewall_event` rows newer than `since` (epoch ms) as JSON values.
+/// Called in-process by the orchestrator's TARGET reader.
+pub fn query_events(db: &Path, since: i64) -> Result<Vec<Value>> {
+    let connection = open_db(db)?;
     let mut statement = connection
         .prepare(
             "SELECT event_id, event_time_ms, event_type, action, app_id, ifindex, \
@@ -45,7 +51,7 @@ pub fn dump_events(args: &EventQueryArgs) -> Result<()> {
         .context("failed to prepare firewall_event query")?;
 
     let rows = statement
-        .query_map([args.since], |row| {
+        .query_map([since], |row| {
             Ok(json!({
                 "event_id": row.get::<_, String>(0)?,
                 "event_time_ms": row.get::<_, i64>(1)?,
@@ -66,19 +72,13 @@ pub fn dump_events(args: &EventQueryArgs) -> Result<()> {
         .context("failed to query firewall_event")?
         .collect::<rusqlite::Result<Vec<Value>>>()
         .context("failed to read firewall_event rows")?;
-
-    println!(
-        "{}",
-        json!({ "since": args.since, "count": rows.len(), "events": rows })
-    );
-    Ok(())
+    Ok(rows)
 }
 
-/// Dump side-channel monitor reports from the outbox (events 102/231/303),
-/// optionally filtered by `report_type`, newer than `since` (epoch ms).
-pub fn dump_reports(args: &ReportQueryArgs) -> Result<()> {
-    let connection = Connection::open_with_flags(&args.db, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .with_context(|| format!("failed to open idps-fw state db {}", args.db.display()))?;
+/// Query side-channel monitor reports (events 102/231/303) newer than `since`,
+/// optionally filtered by `report_type`. Called in-process by the orchestrator.
+pub fn query_reports(db: &Path, since: i64, report_type: Option<&str>) -> Result<Vec<Value>> {
+    let connection = open_db(db)?;
     let sql = "SELECT report_id, report_type, payload, created_at_ms \
                FROM report_outbox \
                WHERE created_at_ms > ?1 AND (?2 IS NULL OR report_type = ?2) \
@@ -86,9 +86,8 @@ pub fn dump_reports(args: &ReportQueryArgs) -> Result<()> {
     let mut statement = connection
         .prepare(sql)
         .context("failed to prepare report_outbox query")?;
-    let type_filter = args.report_type.clone();
     let rows = statement
-        .query_map(rusqlite::params![args.since, type_filter], |row| {
+        .query_map(rusqlite::params![since, report_type], |row| {
             let payload: String = row.get(2)?;
             let parsed: Value = serde_json::from_str(&payload).unwrap_or(Value::String(payload));
             Ok(json!({
@@ -101,7 +100,22 @@ pub fn dump_reports(args: &ReportQueryArgs) -> Result<()> {
         .context("failed to query report_outbox")?
         .collect::<rusqlite::Result<Vec<Value>>>()
         .context("failed to read report_outbox rows")?;
+    Ok(rows)
+}
 
+pub fn dump_events(args: &EventQueryArgs) -> Result<()> {
+    let rows = query_events(&args.db, args.since)?;
+    println!(
+        "{}",
+        json!({ "since": args.since, "count": rows.len(), "events": rows })
+    );
+    Ok(())
+}
+
+/// Dump side-channel monitor reports from the outbox (events 102/231/303),
+/// optionally filtered by `report_type`, newer than `since` (epoch ms).
+pub fn dump_reports(args: &ReportQueryArgs) -> Result<()> {
+    let rows = query_reports(&args.db, args.since, args.report_type.as_deref())?;
     println!(
         "{}",
         json!({ "since": args.since, "count": rows.len(), "reports": rows })
@@ -110,7 +124,7 @@ pub fn dump_reports(args: &ReportQueryArgs) -> Result<()> {
 }
 
 pub fn report_status(args: &EventQueryArgs) -> Result<()> {
-    let connection = open_db(args)?;
+    let connection = open_db(&args.db)?;
 
     // Per-event report_state for events newer than `since`.
     let mut event_stmt = connection

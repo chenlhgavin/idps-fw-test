@@ -1,24 +1,19 @@
-//! Command line surface for the on-device fw-agent worker.
+//! Command line surface for the `fw-verify agent` worker.
 //!
-//! Every subcommand prints a single JSON object to stdout so the host-side
-//! `fw-verify` orchestrator can parse the result over `adb shell`.
+//! These subcommands are the worker the orchestrator drives: it calls them
+//! directly in-process for TARGET-side work, and re-executes itself
+//! (`fw-verify agent <sub>`) inside the PEER network namespace — or under a
+//! dropped uid — for everything that cannot run in the orchestrator process.
+//! Every subcommand prints a single JSON object to stdout so a re-executed
+//! worker can hand its result back over a pipe.
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 
-/// On-device worker for idps-fw functional tests.
-#[derive(Debug, Parser)]
-#[command(name = "fw-agent", about, version)]
-pub struct Cli {
-    /// Subcommand to run.
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-/// Supported subcommands.
+/// Worker subcommands (hidden behind `fw-verify agent`).
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub enum AgentCommand {
     /// Write an encrypted firewall/traffic rule into the idps-server depot.
     ProvisionRule(ProvisionArgs),
     /// Dump `firewall_event` rows newer than a timestamp as JSON.
@@ -150,6 +145,11 @@ pub struct TrafficArgs {
     /// For ICMP, which request kind to send (echo or timestamp).
     #[arg(long, value_enum, default_value_t = IcmpKind::Echo)]
     pub icmp_type: IcmpKind,
+
+    /// Drop to this uid/gid before sending (app/UID-policy cases), so the eBPF
+    /// cgroup connect-hook sees the socket owned by the mapped app uid.
+    #[arg(long)]
+    pub uid: Option<u32>,
 }
 
 /// `conn-flood` arguments: open and hold many concurrent TCP connections.

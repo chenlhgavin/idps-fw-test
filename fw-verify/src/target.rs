@@ -1,12 +1,19 @@
 //! TARGET-side observation: idps-fw health/statistics and firewall events.
+//!
+//! The orchestrator runs on the TARGET as root, so depot/state queries are made
+//! in-process via the `agent` module; only the external idps-fw health and
+//! statistics snapshots are read by running the `idps-fw` binary.
+
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::agent;
 use crate::config::RunConfig;
 
-/// A `firewall_event` row as emitted by `fw-agent dump-events`.
+/// A `firewall_event` row as produced by the agent event query.
 ///
 /// Mirrors the on-device schema; not every column participates in matching.
 #[derive(Debug, Clone, Deserialize)]
@@ -47,27 +54,18 @@ pub fn firewall_rule_ver(cfg: &RunConfig) -> Result<i64> {
         .unwrap_or(-1))
 }
 
-/// Device wall-clock watermark used to scope per-case events.
-pub fn now_ms(cfg: &RunConfig) -> Result<i64> {
-    cfg.target
-        .shell_json(&format!("{} now", cfg.fw_agent))?
-        .get("now_ms")
-        .and_then(Value::as_i64)
-        .context("fw-agent now did not return now_ms")
+/// Wall-clock watermark used to scope per-case events (epoch ms).
+pub fn now_ms(_cfg: &RunConfig) -> Result<i64> {
+    Ok(agent::now_ms())
 }
 
 /// Firewall events newer than `since` (epoch ms).
 pub fn dump_events(cfg: &RunConfig, since: i64) -> Result<Vec<FwEvent>> {
-    let cmd = format!(
-        "{} dump-events --db {} --since {since}",
-        cfg.fw_agent, cfg.state_db
-    );
-    let value = cfg.target.shell_json(&cmd)?;
-    let events = value.get("events").cloned().unwrap_or(Value::Array(vec![]));
-    serde_json::from_value(events).context("failed to parse firewall_event rows")
+    let rows = agent::events::query_events(Path::new(&cfg.state_db), since)?;
+    serde_json::from_value(Value::Array(rows)).context("failed to parse firewall_event rows")
 }
 
-/// One side-channel monitor report as emitted by `fw-agent dump-reports`.
+/// One side-channel monitor report as produced by the agent report query.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FwReport {
     pub report_type: String,
@@ -78,14 +76,6 @@ pub struct FwReport {
 
 /// Side-channel monitor reports (events 102/231/303) newer than `since`.
 pub fn dump_reports(cfg: &RunConfig, since: i64) -> Result<Vec<FwReport>> {
-    let cmd = format!(
-        "{} dump-reports --db {} --since {since}",
-        cfg.fw_agent, cfg.state_db
-    );
-    let value = cfg.target.shell_json(&cmd)?;
-    let reports = value
-        .get("reports")
-        .cloned()
-        .unwrap_or(Value::Array(vec![]));
-    serde_json::from_value(reports).context("failed to parse report_outbox rows")
+    let rows = agent::events::query_reports(Path::new(&cfg.state_db), since, None)?;
+    serde_json::from_value(Value::Array(rows)).context("failed to parse report_outbox rows")
 }

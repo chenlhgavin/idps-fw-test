@@ -4,42 +4,34 @@
 #   command-line flag  >  FWV_* environment variable  >  this file  >  default
 #
 # Pass it with:  fw-verify --config fw-verify.conf <subcommand>
+#
+# `fw-verify setup-env` generates a ready-to-use config at /etc/idd/fw-verify.conf;
+# this example documents the keys for manual edits.
 
-# --- mode: android (two phones over adb) | host (local veth/netns) -----------
-# In host mode rules are delivered through the VSOC API (see the host section
-# below); `make setup-dev` in idps-fw-test generates a ready-to-use host config.
-mode = android
+# --- mode: how rules are delivered (the only difference between platforms) ---
+#   host    — deliver rules through the VSOC dashboard API (mutual TLS)
+#   android — write the encrypted depot directly on the device under test
+mode = host
 
-# === ANDROID mode ============================================================
-# --- devices (required in android mode) --------------------------------------
-# adb serials (see `adb devices`).
-target_serial = 79MV5T5D85RSINQG
-peer_serial   = XGRWZXVSUKXW7XMF
-
-# === HOST mode ===============================================================
-# Uncomment these for `mode = host`. The peer veth end lives in a netns so
-# target<->peer traffic traverses idps-fw's monitored interface; run as root.
+# --- topology (defaults shown; created by `setup-env`) -----------------------
+# The peer veth end lives in a netns so target<->peer traffic traverses idps-fw's
+# monitored interface. Run fw-verify as root.
 # target_iface = fwt0
 # peer_iface   = fwp0
 # peer_netns   = fwpeer
 # target_ip    = 10.123.0.1
 # peer_ip      = 10.123.0.2
-# Rule delivery via the VSOC dashboard API (mutual TLS):
-# vsoc_url   = https://127.0.0.1:8443
-# vsoc_cert  = /home/ubuntu/workspace/idps/vsoc/certs/rsa/client.crt
-# vsoc_key   = /home/ubuntu/workspace/idps/vsoc/certs/rsa/client.key
+# veth_prefix  = 24
+
+# --- host mode: rule delivery via the VSOC dashboard API (mutual TLS) ---------
+# vsoc_url    = https://127.0.0.1:8443
+# vsoc_cert   = /home/ubuntu/workspace/idps/vsoc/certs/rsa/client.crt
+# vsoc_key    = /home/ubuntu/workspace/idps/vsoc/certs/rsa/client.key
 # vsoc_cacert = /home/ubuntu/workspace/idps/vsoc/certs/rsa/ca.crt
 
-# --- addresses (optional; auto-detected from the interface when omitted) -----
-target_ip = 172.20.10.3
-peer_ip   = 172.20.10.2
-
-# --- interfaces (default wlan0) ----------------------------------------------
-# target_iface = wlan0
-# peer_iface   = wlan0
-
 # --- app / UID policy case ---------------------------------------------------
-# identity_overrides maps app_identity_key -> app_uid (injected by apply-fast-profile).
+# identity_overrides maps app_identity_key -> app_uid (written into idps-fw.yaml
+# by setup-env); traffic for app/UID cases is sent with `agent traffic --uid`.
 # app_uid          = 2000
 # app_identity_key = com.demo.browser
 # app_pkg          = com.demo.browser
@@ -47,13 +39,11 @@ peer_ip   = 172.20.10.2
 
 # --- report-to-idps-server confirmation: local | server | vsoc ---------------
 # report_confirm = local
-# vsoc_url       = http://172.20.10.10:8000
 
 # --- timings -----------------------------------------------------------------
 # reload_timeout_secs = 30
 # event_settle_ms     = 1500
 
-# --- on-device binary/path overrides (rarely needed) -------------------------
-# fw_agent = fw-agent
+# --- on-device path overrides (rarely needed) --------------------------------
 # idps_fw  = idps-fw
 # state_db = /data/idd/idps-fw/state.sqlite3
