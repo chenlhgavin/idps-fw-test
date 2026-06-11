@@ -204,18 +204,34 @@ fn event_matches(cfg: &RunConfig, case: &FwCase, ev: &FwEvent, expect: &ExpectEv
 
 /// Confirm idps-fw delivered the event to idps-server (`report_state = 'sent'`).
 fn confirm_local_sent(cfg: &RunConfig, since: i64, event_id: &str) -> bool {
+    eprintln!("fw-verify: waiting for report upload confirmation (event_id={event_id})");
+    let start = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(8);
+    let mut next_log = start + Duration::from_secs(5);
     loop {
         if let Ok(events) = target::dump_events(cfg, since) {
             if events
                 .iter()
                 .any(|e| e.event_id == event_id && e.report_state == "sent")
             {
+                eprintln!(
+                    "fw-verify: report upload confirmed after {}s (event_id={event_id})",
+                    start.elapsed().as_secs()
+                );
                 return true;
             }
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
+            eprintln!("fw-verify: report upload confirmation timed out (event_id={event_id})");
             return false;
+        }
+        if now >= next_log {
+            eprintln!(
+                "fw-verify: still waiting for report upload confirmation (event_id={event_id}, elapsed={}s)",
+                start.elapsed().as_secs()
+            );
+            next_log = now + Duration::from_secs(5);
         }
         sleep(Duration::from_millis(700));
     }
@@ -244,6 +260,7 @@ fn confirm_vsoc(cfg: &RunConfig) -> String {
 /// Run a single case (its bundle must already be provisioned).
 pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
     if let Some(reason) = case.skip {
+        eprintln!("fw-verify: case {} skipped: {reason}", case.id);
         return result(case, "SKIP", reason);
     }
     if case.group == Group::Traffic {
@@ -253,6 +270,10 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
     // Start listeners and let them bind.
     let mut children = Vec::new();
     for spec in &case.listen {
+        eprintln!(
+            "fw-verify: case {} starting {} listener on port {}",
+            case.id, spec.proto, spec.port
+        );
         match peer::start_listener(
             endpoint(cfg, spec.side),
             cfg,
@@ -269,6 +290,7 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
     }
 
     let (_src, _dst, to) = flow(cfg, case.origin);
+    eprintln!("fw-verify: case {} reading event watermark", case.id);
     let since = match target::now_ms(cfg) {
         Ok(value) => value,
         Err(error) => {
@@ -284,6 +306,10 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
 
     let cmd = build_cmd(case, to);
     let uid = case.uid.then_some(cfg.app_uid);
+    eprintln!(
+        "fw-verify: case {} generating {} traffic toward {}",
+        case.id, cmd.proto, to
+    );
     let outcome = match peer::traffic(endpoint(cfg, case.origin), cfg, &cmd, uid) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -298,6 +324,7 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
     };
 
     sleep(cfg.event_settle);
+    eprintln!("fw-verify: case {} reading firewall events", case.id);
     let events = target::dump_events(cfg, since).unwrap_or_default();
 
     let mut res = result(case, "PASS", String::new());
@@ -390,6 +417,7 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
 }
 
 fn run_traffic_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
+    eprintln!("fw-verify: case {} reading baseline statistics", case.id);
     let before = match target::statistics(cfg) {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", format!("stats failed: {error:#}")),
@@ -397,11 +425,20 @@ fn run_traffic_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
     let (_src, _dst, to) = flow(cfg, case.origin);
     let cmd = build_cmd(case, to);
     let uid = case.uid.then_some(cfg.app_uid);
+    eprintln!(
+        "fw-verify: case {} generating {} traffic toward {}",
+        case.id, cmd.proto, to
+    );
     if let Err(error) = peer::traffic(endpoint(cfg, case.origin), cfg, &cmd, uid) {
         return result(case, "FAIL", format!("traffic failed: {error:#}"));
     }
     // Wait for a traffic window (cycle=5s) to close plus a settle margin.
+    eprintln!(
+        "fw-verify: case {} waiting 7s for traffic statistics window",
+        case.id
+    );
     sleep(Duration::from_secs(7));
+    eprintln!("fw-verify: case {} reading updated statistics", case.id);
     let after = match target::statistics(cfg) {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", format!("stats failed: {error:#}")),
@@ -477,10 +514,12 @@ fn finish_with(
 }
 
 fn provision_bundle(cfg: &RunConfig, bundle: Bundle) -> anyhow::Result<()> {
+    eprintln!("fw-verify: provisioning bundle {}", bundle_name(bundle));
     provision::provision_firewall(cfg, &firewall_text(bundle, cfg))?;
     if let Some(cycle) = traffic_cycle(bundle) {
         provision::provision_traffic_cycle(cfg, cycle)?;
     }
+    eprintln!("fw-verify: bundle {} is ready", bundle_name(bundle));
     Ok(())
 }
 
@@ -512,7 +551,10 @@ pub fn run_one(cfg: &RunConfig, id: &str) -> Vec<CaseResult> {
     if let Err(error) = provision_bundle(cfg, case.bundle) {
         return vec![provision_error(&case, &error)];
     }
-    vec![run_case(cfg, &case)]
+    eprintln!("fw-verify: running case 1/1: {}", case.id);
+    let result = run_case(cfg, &case);
+    eprintln!("fw-verify: case {} -> {}", case.id, result.result);
+    vec![result]
 }
 
 /// Run the cases in a group, provisioning each needed bundle once.
@@ -526,6 +568,7 @@ pub fn run_group(cfg: &RunConfig, group: Group) -> Vec<CaseResult> {
 /// Run the whole catalog, batching by bundle, then the side-channel monitors.
 pub fn run_all(cfg: &RunConfig) -> Vec<CaseResult> {
     let mut results = run_filtered(cfg, |_| true);
+    eprintln!("fw-verify: running monitor cases");
     results.extend(crate::monitor::run_monitor_all(cfg));
     results
 }
@@ -534,6 +577,9 @@ fn run_filtered(cfg: &RunConfig, keep: impl Fn(&FwCase) -> bool) -> Vec<CaseResu
     // idps-fw needs a fun=4 rule to leave RuleSyncing before any fun=1 loads.
     let _ = provision::write_traffic_rule(cfg, 5);
     let cases = all_cases();
+    let total = cases.iter().filter(|case| keep(case)).count();
+    let mut completed = 0;
+    eprintln!("fw-verify: starting {total} firewall cases");
     let mut results = Vec::new();
     for &bundle in bundle_order() {
         let members: Vec<&FwCase> = cases
@@ -543,14 +589,29 @@ fn run_filtered(cfg: &RunConfig, keep: impl Fn(&FwCase) -> bool) -> Vec<CaseResu
         if members.is_empty() {
             continue;
         }
+        eprintln!(
+            "fw-verify: bundle {} contains {} selected cases",
+            bundle_name(bundle),
+            members.len()
+        );
         if let Err(error) = provision_bundle(cfg, bundle) {
+            eprintln!(
+                "fw-verify: bundle {} provisioning failed: {error:#}",
+                bundle_name(bundle)
+            );
             for case in &members {
+                completed += 1;
                 results.push(provision_error(case, &error));
+                eprintln!("fw-verify: case {} -> FAIL", case.id);
             }
             continue;
         }
         for case in members {
-            results.push(run_case(cfg, case));
+            completed += 1;
+            eprintln!("fw-verify: running case {completed}/{total}: {}", case.id);
+            let result = run_case(cfg, case);
+            eprintln!("fw-verify: case {} -> {}", case.id, result.result);
+            results.push(result);
         }
     }
     results

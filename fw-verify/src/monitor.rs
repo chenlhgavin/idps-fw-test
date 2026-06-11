@@ -126,6 +126,10 @@ pub fn run_monitor_filtered(
     if cases.is_empty() {
         return Vec::new();
     }
+    eprintln!(
+        "fw-verify: provisioning monitor allow-all baseline ({} cases)",
+        cases.len()
+    );
     let _ = provision::write_traffic_rule(cfg, 5);
     if let Err(error) = provision::provision_firewall(cfg, "chain=localin,action=P\n") {
         return cases
@@ -133,7 +137,22 @@ pub fn run_monitor_filtered(
             .map(|case| result(case, "FAIL", "none", format!("provision failed: {error:#}")))
             .collect();
     }
-    cases.iter().map(|case| run_monitor(cfg, case)).collect()
+    let total = cases.len();
+    cases
+        .iter()
+        .enumerate()
+        .map(|(index, case)| {
+            eprintln!(
+                "fw-verify: running monitor case {}/{}: {}",
+                index + 1,
+                total,
+                case.id
+            );
+            let result = run_monitor(cfg, case);
+            eprintln!("fw-verify: monitor case {} -> {}", case.id, result.result);
+            result
+        })
+        .collect()
 }
 
 /// Run one monitor case by id (provisioning the allow-all baseline first).
@@ -151,6 +170,7 @@ fn run_monitor(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
 }
 
 fn run_icmp_timestamp(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
+    eprintln!("fw-verify: monitor case {} reading watermark", case.id);
     let since = match target::now_ms(cfg) {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", "none", format!("watermark failed: {error:#}")),
@@ -171,6 +191,11 @@ fn run_icmp_timestamp(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
     if let Err(error) = peer::traffic(&cfg.peer, cfg, &cmd, None) {
         return result(case, "FAIL", "none", format!("probe failed: {error:#}"));
     }
+    eprintln!(
+        "fw-verify: monitor case {} waiting {}ms for event settle",
+        case.id,
+        cfg.event_settle.as_millis()
+    );
     sleep(cfg.event_settle);
     let events = target::dump_events(cfg, since).unwrap_or_default();
     let src = cfg.peer_ip.to_string();
@@ -185,11 +210,16 @@ fn run_icmp_timestamp(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
 }
 
 fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
+    eprintln!("fw-verify: monitor case {} reading watermark", case.id);
     let since = match target::now_ms(cfg) {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", "none", format!("watermark failed: {error:#}")),
     };
     // Held listener on the target; flood from the peer, held across a monitor cycle.
+    eprintln!(
+        "fw-verify: monitor case {} starting held listener on port {FLOOD_PORT}",
+        case.id
+    );
     let listener = match cfg.target.spawn_shell(&format!(
         "{} listen tcp --port {FLOOD_PORT} --duration-secs {} --hold",
         cfg.fw_agent,
@@ -199,6 +229,10 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         Err(error) => return result(case, "FAIL", "none", format!("listener failed: {error:#}")),
     };
     sleep(Duration::from_millis(500));
+    eprintln!(
+        "fw-verify: monitor case {} opening {CONN_FLOOD_COUNT} held TCP connections",
+        case.id
+    );
     let flood = cfg.peer.spawn_shell(&format!(
         "{} conn-flood --to {} --dport {FLOOD_PORT} --count {CONN_FLOOD_COUNT} --hold-secs {HOLD_SECS}",
         cfg.fw_agent, cfg.target_ip
@@ -215,6 +249,11 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
             );
         }
     };
+    eprintln!(
+        "fw-verify: monitor case {} waiting {}s for connection monitor sample",
+        case.id,
+        MONITOR_SETTLE.as_secs()
+    );
     sleep(MONITOR_SETTLE);
     let reports = target::dump_reports(cfg, since).unwrap_or_default();
     let _ = flood.kill();
@@ -253,11 +292,17 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
 }
 
 fn run_conn_total(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
+    eprintln!("fw-verify: monitor case {} reading watermark", case.id);
     let since = match target::now_ms(cfg) {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", "none", format!("watermark failed: {error:#}")),
     };
     // The total-connection monitor samples unconditionally each cycle.
+    eprintln!(
+        "fw-verify: monitor case {} waiting {}s for total-connection monitor sample",
+        case.id,
+        MONITOR_SETTLE.as_secs()
+    );
     sleep(MONITOR_SETTLE);
     let reports = target::dump_reports(cfg, since).unwrap_or_default();
     match reports.iter().find(|r| r.report_type == "tcp_conn_total") {
@@ -274,6 +319,7 @@ fn run_conn_total(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
 }
 
 fn run_arp_spoof(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
+    eprintln!("fw-verify: monitor case {} reading watermark", case.id);
     let since = match target::now_ms(cfg) {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", "none", format!("watermark failed: {error:#}")),
@@ -285,6 +331,11 @@ fn run_arp_spoof(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
     if let Err(error) = cfg.peer.shell_json(&cmd) {
         return result(case, "FAIL", "none", format!("arp-spoof failed: {error:#}"));
     }
+    eprintln!(
+        "fw-verify: monitor case {} waiting {}s for ARP monitor sample",
+        case.id,
+        MONITOR_SETTLE.as_secs()
+    );
     sleep(MONITOR_SETTLE);
     let reports = target::dump_reports(cfg, since).unwrap_or_default();
     let matched = reports
