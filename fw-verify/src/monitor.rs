@@ -33,7 +33,12 @@ const FLOOD_PORT: u16 = 7400;
 pub enum MonitorKind {
     /// Peer sends an ICMP timestamp request (type 13).
     IcmpTimestamp,
-    /// Peer holds many TCP connections so one destination IP crosses threshold.
+    /// Target holds many TCP connections toward the peer so one destination IP
+    /// crosses the threshold. The flood runs target->peer because idps-fw
+    /// counts by the original-direction destination IP when conntrack is
+    /// available and by the socket's remote IP on the /proc/net/tcp fallback —
+    /// only an outbound flood attributes the connections to the peer IP under
+    /// both readings.
     ConnPerIp,
     /// The always-on total-connection monitor samples at least once.
     ConnTotal,
@@ -68,7 +73,7 @@ pub fn monitor_cases() -> Vec<MonitorCase> {
         MonitorCase {
             id: "monitor-conn-perip",
             kind: MonitorKind::ConnPerIp,
-            notes: "many held connections push one dst IP past the threshold (231)",
+            notes: "many held target->peer connections push the peer IP past the threshold (231)",
         },
         MonitorCase {
             id: "monitor-arp-spoof",
@@ -198,7 +203,10 @@ fn run_icmp_timestamp(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         cfg.event_settle.as_millis()
     );
     sleep(cfg.event_settle);
-    let events = target::dump_events(cfg, since).unwrap_or_default();
+    let events = target::dump_events(cfg, since).unwrap_or_else(|error| {
+        eprintln!("fw-verify: case {} event query failed: {error:#}", case.id);
+        Vec::new()
+    });
     let src = cfg.peer_ip.to_string();
     if events
         .iter()
@@ -216,12 +224,15 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         Ok(value) => value,
         Err(error) => return result(case, "FAIL", "none", format!("watermark failed: {error:#}")),
     };
-    // Held listener on the target; flood from the peer, held across a monitor cycle.
+    // Held listener on the peer; flood from the target, held across a monitor
+    // cycle. Outbound (target->peer) so both conntrack (original-direction dst)
+    // and the /proc/net/tcp fallback (socket remote) attribute the connections
+    // to the peer IP.
     eprintln!(
         "fw-verify: monitor case {} starting held listener on port {FLOOD_PORT}",
         case.id
     );
-    let listener = match cfg.target.agent_spawn(&[
+    let listener = match cfg.peer.agent_spawn(&[
         "listen".to_string(),
         "tcp".to_string(),
         "--port".to_string(),
@@ -238,10 +249,10 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         "fw-verify: monitor case {} opening {CONN_FLOOD_COUNT} held TCP connections",
         case.id
     );
-    let flood = cfg.peer.agent_spawn(&[
+    let flood = cfg.target.agent_spawn(&[
         "conn-flood".to_string(),
         "--to".to_string(),
-        cfg.target_ip.to_string(),
+        cfg.peer_ip.to_string(),
         "--dport".to_string(),
         FLOOD_PORT.to_string(),
         "--count".to_string(),
@@ -267,7 +278,10 @@ fn run_conn_perip(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         MONITOR_SETTLE.as_secs()
     );
     sleep(MONITOR_SETTLE);
-    let reports = target::dump_reports(cfg, since).unwrap_or_default();
+    let reports = target::dump_reports(cfg, since).unwrap_or_else(|error| {
+        eprintln!("fw-verify: case {} report query failed: {error:#}", case.id);
+        Vec::new()
+    });
     let _ = flood.kill();
     let _ = teardown(listener);
 
@@ -316,7 +330,10 @@ fn run_conn_total(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         MONITOR_SETTLE.as_secs()
     );
     sleep(MONITOR_SETTLE);
-    let reports = target::dump_reports(cfg, since).unwrap_or_default();
+    let reports = target::dump_reports(cfg, since).unwrap_or_else(|error| {
+        eprintln!("fw-verify: case {} report query failed: {error:#}", case.id);
+        Vec::new()
+    });
     match reports.iter().find(|r| r.report_type == "tcp_conn_total") {
         Some(report) => {
             let total = report
@@ -354,7 +371,10 @@ fn run_arp_spoof(cfg: &RunConfig, case: &MonitorCase) -> CaseResult {
         MONITOR_SETTLE.as_secs()
     );
     sleep(MONITOR_SETTLE);
-    let reports = target::dump_reports(cfg, since).unwrap_or_default();
+    let reports = target::dump_reports(cfg, since).unwrap_or_else(|error| {
+        eprintln!("fw-verify: case {} report query failed: {error:#}", case.id);
+        Vec::new()
+    });
     let matched = reports
         .iter()
         .filter(|r| r.report_type == "arp_spoof")

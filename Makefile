@@ -211,65 +211,45 @@ push-fwverify:
 	adb -s "$(DEVICE)" shell "cp /data/local/tmp/fw-verify /system/bin/fw-verify && chmod 755 /system/bin/fw-verify"
 	@echo "installed fw-verify to /system/bin on $(DEVICE)"
 
-# Build the Android fw-verify (system.zip) and assemble the installable package
+# Build the Android fw-verify payload and assemble the installable package
 # (install.bat) + distributable zip. adb is used only to install the binary;
 # the tests run on the device after `adb shell`.
 package-android:
 	@set -e; \
 	OUTPUT_DIR="$(ANDROID_PACKAGE_OUT)"; \
-	PAYLOAD_DIR="$$OUTPUT_DIR/.payload-stage"; \
+	PAYLOAD_DIR="$$OUTPUT_DIR"; \
 	BIN_DIR="$$PAYLOAD_DIR$(ANDROID_BIN_INSTALL_DIR)"; \
 	SCRIPT_PATH="$$OUTPUT_DIR/install.bat"; \
-	SYSTEM_ZIP_PATH="$$OUTPUT_DIR/system.zip"; \
 	ZIP_PATH="$(ANDROID_PACKAGE_ZIP)"; \
 	printf "\n  $(C_BOLD)$(C_CYAN)idps-fw-test Firewall Package (fw-verify)$(C_RESET)\n\n"; \
 	$(MAKE) --no-print-directory release platform=android; \
 	test -x "$(ANDROID_FWVERIFY_BIN)" || { echo "missing Android binary: $(ANDROID_FWVERIFY_BIN)"; exit 1; }; \
-	test -f "$(DEVICE_PROVIDER_ANDROID_LIB)" || { echo "missing device-provider lib: $(DEVICE_PROVIDER_ANDROID_LIB)"; exit 1; }; \
 	rm -rf "$$OUTPUT_DIR"; \
 	rm -f "$$(dirname "$$ZIP_PATH")"/idps-fw-test-*.zip; \
 	mkdir -p "$$BIN_DIR"; \
 	install -m 755 "$(ANDROID_FWVERIFY_BIN)" "$$BIN_DIR/fw-verify"; \
-	install -D -m 644 "$(DEVICE_PROVIDER_ANDROID_LIB)" "$$PAYLOAD_DIR/system/lib64/libidps_device_provider.so"; \
 	install -m 644 "$(FWVERIFY_CONF_EXAMPLE)" "$$OUTPUT_DIR/fw-verify.conf"; \
-	python3 -c "import os, sys, zipfile; src, root_name, dst = sys.argv[1:4]; zf = zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED); root_dir = os.path.join(src, root_name); [zf.write(os.path.join(root, name), os.path.relpath(os.path.join(root, name), src)) for root, _, files in os.walk(root_dir) for name in files]; zf.close()" "$$PAYLOAD_DIR" system "$$SYSTEM_ZIP_PATH"; \
-	rm -rf "$$PAYLOAD_DIR"; \
 	printf '%s\r\n' \
 		'@echo off' \
 		'setlocal enabledelayedexpansion' \
 		'' \
 		'set "SCRIPT_DIR=%~dp0"' \
+		'if "%SCRIPT_DIR:~-1%"=="\\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"' \
+		'set "PAYLOAD_DIR=%SCRIPT_DIR%"' \
 		'set "ADB_BIN=adb.exe"' \
 		'where /q "%ADB_BIN%" || set "ADB_BIN=adb"' \
 		'where /q "%ADB_BIN%" || (echo adb not found in PATH.& goto :error)' \
 		'if "%DEVICE_SERIAL%"=="" set "DEVICE_SERIAL=$(DEVICE_SERIAL)"' \
 		'set "ADB_ARGS="' \
 		'if not "%DEVICE_SERIAL%"=="" set "ADB_ARGS=-s %DEVICE_SERIAL%"' \
-		'set "PACKAGE_DIR=%SCRIPT_DIR%"' \
-		'if not exist "%PACKAGE_DIR%system.zip" if exist "%SCRIPT_DIR%idps-fw-test\system.zip" set "PACKAGE_DIR=%SCRIPT_DIR%idps-fw-test\"' \
-		'set "LOCAL_SYSTEM_ZIP=%PACKAGE_DIR%system.zip"' \
-		'if not exist "%LOCAL_SYSTEM_ZIP%" (echo Missing system zip: %LOCAL_SYSTEM_ZIP%& goto :error)' \
-		'set "LOCAL_STAGE=%TEMP%\idps-fw-test-install-%RANDOM%"' \
-		'if exist "%LOCAL_STAGE%" rmdir /s /q "%LOCAL_STAGE%" >nul 2>nul' \
-		'mkdir "%LOCAL_STAGE%" || (echo Failed to create temp dir: %LOCAL_STAGE%& goto :error)' \
-		'copy /y "%LOCAL_SYSTEM_ZIP%" "%LOCAL_STAGE%\system.zip" >nul || (echo Failed to copy system.zip.& goto :error)' \
-		'set "PUSH_SYSTEM_ZIP=%LOCAL_STAGE%\system.zip"' \
-		'set "DEVICE_STAGE=/data/local/tmp/idps-fw-test-install"' \
-		'set "DEVICE_SYSTEM_ZIP=%DEVICE_STAGE%/system.zip"' \
-		'set "DEVICE_UNPACK=%DEVICE_STAGE%/unpacked"' \
 		'"%ADB_BIN%" %ADB_ARGS% wait-for-device || goto :error' \
 		'"%ADB_BIN%" %ADB_ARGS% root || goto :error' \
 		'"%ADB_BIN%" %ADB_ARGS% wait-for-device || goto :error' \
 		'"%ADB_BIN%" %ADB_ARGS% remount || goto :error' \
-		'"%ADB_BIN%" %ADB_ARGS% shell "rm -rf %DEVICE_UNPACK% && mkdir -p %DEVICE_UNPACK% %DEVICE_STAGE% /system/bin" || goto :error' \
-		'"%ADB_BIN%" %ADB_ARGS% push "%PUSH_SYSTEM_ZIP%" "%DEVICE_SYSTEM_ZIP%" || (echo Failed to push system.zip.& goto :error)' \
-		'"%ADB_BIN%" %ADB_ARGS% shell "if command -v unzip >/dev/null 2>&1; then unzip -o %DEVICE_SYSTEM_ZIP% -d %DEVICE_UNPACK% >/dev/null; elif toybox --help 2>/dev/null | grep -qw unzip; then toybox unzip -o %DEVICE_SYSTEM_ZIP% -d %DEVICE_UNPACK% >/dev/null; else echo Device unzip failed: unzip is not available.; exit 1; fi" || goto :error' \
-		'"%ADB_BIN%" %ADB_ARGS% shell "cp -f %DEVICE_UNPACK%/system/bin/* /system/bin/" || goto :error' \
-		'"%ADB_BIN%" %ADB_ARGS% shell "if [ -e %DEVICE_UNPACK%/system/lib64/libidps_device_provider.so ] && [ ! -e /system/lib64/libidps_device_provider.so ]; then cp -f %DEVICE_UNPACK%/system/lib64/libidps_device_provider.so /system/lib64/ && chmod 644 /system/lib64/libidps_device_provider.so && restorecon /system/lib64/libidps_device_provider.so; fi" || goto :error' \
+		'"%ADB_BIN%" %ADB_ARGS% shell mkdir -p "/system/bin" || goto :error' \
+		'"%ADB_BIN%" %ADB_ARGS% push "%PAYLOAD_DIR%\\system\\bin\\fw-verify" "/system/bin/fw-verify" || goto :error' \
 		'"%ADB_BIN%" %ADB_ARGS% shell chmod 755 "/system/bin/fw-verify" || goto :error' \
 		'"%ADB_BIN%" %ADB_ARGS% shell restorecon -RF "/system/bin/fw-verify" >nul 2>nul' \
-		'"%ADB_BIN%" %ADB_ARGS% shell "rm -rf %DEVICE_STAGE%" >nul 2>nul' \
-		'if not "%LOCAL_STAGE%"=="" rmdir /s /q "%LOCAL_STAGE%" >nul 2>nul' \
 		'echo Installed fw-verify to /system/bin' \
 		'echo Now: adb shell, then run on the device:' \
 		'echo     fw-verify --mode android setup-env' \
@@ -279,15 +259,13 @@ package-android:
 		'goto :eof' \
 		'' \
 		':error' \
-		'if not "%DEVICE_STAGE%"=="" if not "%ADB_BIN%"=="" "%ADB_BIN%" %ADB_ARGS% shell "rm -rf %DEVICE_STAGE%" >nul 2>nul' \
-		'if not "%LOCAL_STAGE%"=="" rmdir /s /q "%LOCAL_STAGE%" >nul 2>nul' \
 		'echo Failed to install idps-fw-test firewall package.' \
 		'echo.' \
 		'set /p "IDPS_INSTALL_PAUSE=Press Enter to exit..."' \
 		'exit /b 1' \
 		> "$$SCRIPT_PATH"; \
 	python3 -c "import os, sys, zipfile; src, dst = sys.argv[1:3]; base = os.path.dirname(src); zf = zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED); [zf.write(os.path.join(root, name), os.path.relpath(os.path.join(root, name), base)) for root, _, files in os.walk(src) for name in files]; zf.close()" "$$OUTPUT_DIR" "$$ZIP_PATH"; \
-	printf "  $(C_GREEN)systemzip$(C_RESET): %s\n" "$$SYSTEM_ZIP_PATH"; \
+	printf "  $(C_GREEN)payload$(C_RESET): %s\n" "$$PAYLOAD_DIR"; \
 	printf "  $(C_GREEN)installer$(C_RESET): %s\n" "$$SCRIPT_PATH"; \
 	printf "  $(C_GREEN)fwconfig$(C_RESET): %s\n" "$$OUTPUT_DIR/fw-verify.conf"; \
 	printf "  $(C_GREEN)zip$(C_RESET): %s\n\n" "$$ZIP_PATH"

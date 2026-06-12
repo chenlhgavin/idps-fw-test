@@ -79,13 +79,13 @@ cd /home/ubuntu/workspace/idps/idps-fw-test && make install   # /usr/local/bin/f
 
 ```bash
 cd /home/ubuntu/workspace/idps/idps-fw-test
-make package-android        # 生成 out/idps-fw-test/{system.zip, install.bat, fw-verify.conf}
+make package-android        # 生成 out/idps-fw-test/{system/, install.bat, fw-verify.conf}
 # 或直连一台设备直接安装:
 make push-fwverify DEVICE=<adb-serial>
 ```
 
-`install.bat`(Windows)经 adb 把 `fw-verify` 装到 `/system/bin`,缺失时补
-`/system/lib64/libidps_device_provider.so`。装完后**登录设备**操作,不再用 adb 驱动测试:
+`install.bat`(Windows)经 adb 把 `fw-verify` 装到 `/system/bin`。装完后**登录设备**操作,
+不再用 adb 驱动测试:
 
 ```bash
 adb -s <serial> shell           # 进入设备 shell
@@ -332,8 +332,8 @@ fw-verify agent dump-events --since "$NOWMS"
   或设备缺 `nsenter`/`ip netns`——确认 `/run/netns/fwpeer` 存在;两种进入方式有自动回退。
 - **放行类一直 refused**:监听没起或起晚;`run` 内部留了 0.5s 绑定窗口,手动复现务必先 listen。
 - **找不到 `libidps_device_provider.so`**:host 确认 root `make install` 装了 provider 库并
-  `ldconfig`,运行带 `LD_LIBRARY_PATH=/usr/local/lib`;Android 重跑 `install.bat`(会补
-  `/system/lib64`)。
+  `ldconfig`,运行带 `LD_LIBRARY_PATH=/usr/local/lib`;Android 确认设备侧运行环境已提供该库,
+  `package-android` 不分发或安装它。
 - **app/UID 用例失败**:确认 `/etc/idd/idps-fw.yaml` 有 `identity_overrides`
   (`com.demo.browser`→2000);改 uid/key 后重跑 `setup-env`。
 - **检测窗口**:扫描/异常突发须 ≤1s、规则入向 `LD`。端口扫描按目的端口全局计数;

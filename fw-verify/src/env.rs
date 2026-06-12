@@ -5,10 +5,12 @@
 //! idps-fw–monitored interface. This module owns the topology (created with
 //! `ip netns`/`ip link`, mirroring idps-test/nidps-verify's create-then-move
 //! fallback), the idps-fw config tuned for fast tests, and the generated
-//! `fw-verify.conf`. On Android it also injects a debug VIN/DSN so idps-server
-//! derives a keystore, then restarts the daemons so the config takes effect.
+//! `fw-verify.conf`. On Android it additionally pins the test subnet to the
+//! main routing table (netd policy routing never consults it for unmarked
+//! sockets), injects a debug VIN/DSN so idps-server derives a keystore, and
+//! restarts the daemons so the config takes effect.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::process::Command;
 use std::thread::sleep;
@@ -31,6 +33,11 @@ const DEFAULT_PEER_IP: Ipv4Addr = Ipv4Addr::new(10, 123, 0, 2);
 const DEFAULT_DEBUG_VIN: &str = "FWVERIFYTEST00001";
 const DEFAULT_DEBUG_DSN: &str = "FWVERIFYTESTDSN01";
 
+/// `ip rule` preference for the test-subnet main-table rule on Android. Must
+/// rank ahead of netd's per-network rules (priorities 10000..32000, ending in
+/// `from all unreachable`) so test traffic resolves via the main table.
+const POLICY_RULE_PREF: &str = "1000";
+
 /// Resolved topology parameters for a setup/clean run.
 struct Topology {
     netns: String,
@@ -39,6 +46,9 @@ struct Topology {
     target_ip: IpAddr,
     peer_ip: IpAddr,
     prefix: u8,
+    /// Android: netd policy routing never consults the main table for unmarked
+    /// sockets, so the veth subnet needs an explicit `ip rule ... lookup main`.
+    policy_route: bool,
 }
 
 impl Topology {
@@ -50,7 +60,27 @@ impl Topology {
             target_ip: global.target_ip.unwrap_or(IpAddr::V4(DEFAULT_TARGET_IP)),
             peer_ip: global.peer_ip.unwrap_or(IpAddr::V4(DEFAULT_PEER_IP)),
             prefix: global.veth_prefix,
+            policy_route: global.mode == Mode::Android,
         }
+    }
+
+    /// The test subnet in CIDR form (network address masked from the target IP).
+    fn subnet(&self) -> String {
+        let network = match self.target_ip {
+            IpAddr::V4(ip) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix.min(32)))
+                    .unwrap_or(0);
+                IpAddr::V4(Ipv4Addr::from(u32::from(ip) & mask))
+            }
+            IpAddr::V6(ip) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix.min(128)))
+                    .unwrap_or(0);
+                IpAddr::V6(Ipv6Addr::from(u128::from(ip) & mask))
+            }
+        };
+        format!("{network}/{}", self.prefix)
     }
 }
 
@@ -69,6 +99,12 @@ pub fn setup(global: &GlobalArgs) -> Result<()> {
         "  topology: {}({}) <-> netns {}:{}({})",
         topo.target_iface, topo.target_ip, topo.netns, topo.peer_iface, topo.peer_ip
     );
+    if topo.policy_route {
+        println!(
+            "  policy route: ip rule pref {POLICY_RULE_PREF} to {} lookup main",
+            topo.subnet()
+        );
+    }
 
     std::fs::create_dir_all(IDD_ETC)
         .with_context(|| format!("failed to create {IDD_ETC} (is the partition writable?)"))?;
@@ -131,11 +167,33 @@ fn teardown_topology(topo: &Topology) {
     // Deleting either veth end removes the pair; deleting the netns is idempotent.
     ignore_ip(&["netns", "del", &topo.netns]);
     ignore_ip(&["link", "del", &topo.target_iface]);
+    // Repeated setups each add a rule, so delete until none is left.
+    let subnet = topo.subnet();
+    let rule = [
+        "rule",
+        "del",
+        "pref",
+        POLICY_RULE_PREF,
+        "to",
+        &subnet,
+        "lookup",
+        "main",
+    ];
+    for _ in 0..16 {
+        let deleted = Command::new("ip")
+            .args(rule)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !deleted {
+            break;
+        }
+    }
 }
 
 fn create_topology(topo: &Topology) -> Result<()> {
     run_ip(&["netns", "add", &topo.netns])?;
     create_veth(topo)?;
+    disable_ipv6(topo);
     run_ip(&[
         "addr",
         "add",
@@ -156,6 +214,23 @@ fn create_topology(topo: &Topology) -> Result<()> {
         ],
     )?;
     run_ip_netns(&topo.netns, &["link", "set", &topo.peer_iface, "up"])?;
+    if topo.policy_route {
+        // Android: route lookups walk netd's policy rules and end in `from all
+        // unreachable` without ever consulting the main table, so target->peer
+        // traffic (including TCP handshake replies) gets ENETUNREACH. Pin the
+        // test subnet to the main table, where the veth subnet route lives.
+        run_ip(&[
+            "rule",
+            "add",
+            "pref",
+            POLICY_RULE_PREF,
+            "to",
+            &topo.subnet(),
+            "lookup",
+            "main",
+        ])
+        .context("failed to add the main-table ip rule for the test subnet")?;
+    }
     Ok(())
 }
 
@@ -190,6 +265,31 @@ fn create_veth(topo: &Topology) -> Result<()> {
     .context("failed to create veth pair")?;
     run_ip(&["link", "set", &topo.peer_iface, "netns", &topo.netns])
         .context("failed to move peer veth into the namespace")
+}
+
+/// Disable IPv6 on both veth ends (best effort: a missing proc entry means the
+/// kernel has no IPv6 and there is nothing to mute). Kernel ND/MLD multicast on
+/// the test link would otherwise hit the detection bundle's default-deny as
+/// dport-0 ingress drops and poison the vendor port-scan classifier's global
+/// 3-slot window, making the scan cases flaky.
+fn disable_ipv6(topo: &Topology) {
+    let _ = std::fs::write(
+        format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", topo.target_iface),
+        "1",
+    );
+    let _ = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            &topo.netns,
+            "sh",
+            "-c",
+            &format!(
+                "echo 1 > /proc/sys/net/ipv6/conf/{}/disable_ipv6",
+                topo.peer_iface
+            ),
+        ])
+        .output();
 }
 
 fn run_ip(args: &[&str]) -> Result<()> {

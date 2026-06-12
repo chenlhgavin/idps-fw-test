@@ -50,7 +50,7 @@ previous config.
 ### Android quickstart
 
 ```bash
-make -C idps-fw-test package-android   # out/idps-fw-test/{system.zip, install.bat, fw-verify.conf}
+make -C idps-fw-test package-android   # out/idps-fw-test/{system/, install.bat, fw-verify.conf}
 # or: make -C idps-fw-test push-fwverify DEVICE=<serial>
 adb -s <serial> shell                  # log in to the device, then on the device (root):
 fw-verify --mode android setup-env
@@ -58,7 +58,7 @@ fw-verify --config /etc/idd/fw-verify.conf run-all
 ```
 
 Build / test / lint / package via the top-level `Makefile` (`make help`).
-`make package-android` produces `system.zip` (the `fw-verify` payload + device-provider lib),
+`make package-android` produces the `system/` payload (`fw-verify`),
 `install.bat`, `fw-verify.conf`, and a distributable zip. The installer pushes the payload with
 `adb` and installs `/system/bin/fw-verify`; everything else runs on the device.
 

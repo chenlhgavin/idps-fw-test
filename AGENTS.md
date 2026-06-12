@@ -29,7 +29,7 @@
   - `make build` / `make release` `[platform=host|android]` — host build, or cross-build for
     the device
   - `make push-fwverify DEVICE=<serial>` — install `/system/bin/fw-verify` on a phone
-  - `make package-android` — assemble the Android payload (`system.zip`) + `install.bat` +
+  - `make package-android` — assemble the Android payload (`system/`) + `install.bat` +
     `fw-verify.conf` + a distributable zip (adb installs the binary only; tests run on-device)
   - `make install` — host-only: install `fw-verify` to `/usr/local/bin`
   - `make setup-dev` / `make clean-dev` — wrappers over `fw-verify setup-env` / `clean-env`

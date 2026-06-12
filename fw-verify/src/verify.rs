@@ -325,7 +325,10 @@ pub fn run_case(cfg: &RunConfig, case: &FwCase) -> CaseResult {
 
     sleep(cfg.event_settle);
     eprintln!("fw-verify: case {} reading firewall events", case.id);
-    let events = target::dump_events(cfg, since).unwrap_or_default();
+    let events = target::dump_events(cfg, since).unwrap_or_else(|error| {
+        eprintln!("fw-verify: case {} event query failed: {error:#}", case.id);
+        Vec::new()
+    });
 
     let mut res = result(case, "PASS", String::new());
     res.enforce_observed = outcome.verdict.clone();

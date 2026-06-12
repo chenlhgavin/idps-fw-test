@@ -6,9 +6,10 @@
 //! target↔peer traffic traverses the idps-fw–monitored interface. Worker steps
 //! that must run in the peer namespace, in the background, or under a dropped
 //! uid are run as `fw-verify agent <sub>` — re-executing this same binary —
-//! and their single JSON line is parsed back. Namespace entry prefers
-//! `nsenter --net=/run/netns/<ns>` and falls back to `ip netns exec <ns>`,
-//! mirroring idps-test/nidps-verify.
+//! and their single JSON line is parsed back. Namespace entry uses
+//! `nsenter --net=/run/netns/<ns>` when that path exists and falls back to
+//! `ip netns exec <ns>` otherwise (Android's iproute2 keeps its netns bind
+//! mounts outside /run), mirroring idps-test/nidps-verify.
 
 use std::io::ErrorKind;
 use std::process::{Child, Command, Stdio};
@@ -37,8 +38,10 @@ impl Endpoint {
     /// Spawn `program` (argv) on this side, entering the peer netns when set.
     ///
     /// `background` detaches the child with null stdio (listeners); otherwise
-    /// stdout/stderr are piped for the caller to collect. Namespace entry tries
-    /// `nsenter` first and falls back to `ip netns exec` when nsenter is absent.
+    /// stdout/stderr are piped for the caller to collect. Namespace entry uses
+    /// `nsenter` when `/run/netns/<ns>` exists (falling back to `ip netns exec`
+    /// when nsenter is absent) and `ip netns exec` directly otherwise, since
+    /// Android's iproute2 mounts namespaces outside /run.
     fn spawn_program(&self, program: &[String], background: bool) -> Result<Child> {
         let make = |argv: &[String]| -> std::io::Result<Child> {
             let mut cmd = Command::new(&argv[0]);
@@ -56,30 +59,33 @@ impl Endpoint {
             }
             Endpoint::Netns { name } => {
                 let ns_path = format!("/run/netns/{name}");
-                let mut via_nsenter = vec![
-                    "nsenter".to_string(),
-                    format!("--net={ns_path}"),
-                    "--".to_string(),
-                ];
-                via_nsenter.extend_from_slice(program);
-                match make(&via_nsenter) {
-                    Ok(child) => Ok(child),
-                    Err(error) if error.kind() == ErrorKind::NotFound => {
-                        let mut via_ip = vec![
-                            "ip".to_string(),
-                            "netns".to_string(),
-                            "exec".to_string(),
-                            name.clone(),
-                        ];
-                        via_ip.extend_from_slice(program);
-                        make(&via_ip).with_context(|| {
-                            format!("failed to spawn `{}` via ip netns exec", program.join(" "))
-                        })
+                if std::path::Path::new(&ns_path).exists() {
+                    let mut via_nsenter = vec![
+                        "nsenter".to_string(),
+                        format!("--net={ns_path}"),
+                        "--".to_string(),
+                    ];
+                    via_nsenter.extend_from_slice(program);
+                    match make(&via_nsenter) {
+                        Ok(child) => return Ok(child),
+                        Err(error) if error.kind() == ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("failed to spawn `{}` via nsenter", program.join(" "))
+                            });
+                        }
                     }
-                    Err(error) => Err(error).with_context(|| {
-                        format!("failed to spawn `{}` via nsenter", program.join(" "))
-                    }),
                 }
+                let mut via_ip = vec![
+                    "ip".to_string(),
+                    "netns".to_string(),
+                    "exec".to_string(),
+                    name.clone(),
+                ];
+                via_ip.extend_from_slice(program);
+                make(&via_ip).with_context(|| {
+                    format!("failed to spawn `{}` via ip netns exec", program.join(" "))
+                })
             }
         }
     }
