@@ -93,8 +93,7 @@ fn interface_mac(iface: &str) -> Result<[u8; 6]> {
     // c_int on Android bionic), so cast to the platform's `Ioctl` alias. The
     // cast is a no-op on glibc, hence the allow.
     #[allow(clippy::unnecessary_cast)]
-    let ret =
-        unsafe { libc::ioctl(fd, libc::SIOCGIFHWADDR as libc::Ioctl, hw.as_mut_ptr()) };
+    let ret = unsafe { libc::ioctl(fd, libc::SIOCGIFHWADDR as libc::Ioctl, hw.as_mut_ptr()) };
     unsafe { libc::close(fd) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error()).context("SIOCGIFHWADDR failed");

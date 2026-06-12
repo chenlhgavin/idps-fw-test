@@ -37,14 +37,15 @@ cd vsoc && make deploy                 # mock VSOC (Docker, mTLS :8443)
 make clean-dev setup-dev install       # idps-server (+ device-provider libs), from idps/ root
 make -C idps-fw setup-dev install      # idps-fw daemon + eBPF object
 make -C idps-fw-test install           # fw-verify -> /usr/local/bin
-make -C idps-fw-test setup-dev         # veth/netns + host idps-fw.yaml + /etc/idd/fw-verify.conf
-sudo systemctl restart idps-fw.service # apply the host idps-fw config
+make -C idps-fw-test setup-dev         # veth/netns + host idps-fw.yaml + config, restarts idps-fw
 make -C idps-fw-test test-host         # run the whole catalog via the generated config
 ```
 
 `setup-dev` runs `fw-verify setup-env`: it creates the topology (`fwt0` 10.123.0.1 ↔ netns
 `fwpeer:fwp0` 10.123.0.2), writes a host-tuned `/etc/idd/idps-fw.yaml` (monitors `fwt0`, short
-poll intervals, app-uid override) and `/etc/idd/fw-verify.conf`; `clean-dev` tears it down.
+poll intervals, app-uid override) and `/etc/idd/fw-verify.conf`, then restarts `idps-fw.service`
+when systemd is available; `clean-dev` tears it down and restarts the service after restoring the
+previous config.
 
 ### Android quickstart
 

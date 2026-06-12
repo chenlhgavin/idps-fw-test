@@ -101,7 +101,6 @@ fw-verify --config /etc/idd/fw-verify.conf run-all
 ```bash
 # host(经 make 包装,带上 VSOC mTLS 证书路径与 NO_PROXY):
 cd /home/ubuntu/workspace/idps/idps-fw-test && make setup-dev
-sudo systemctl restart idps-fw.service      # host 下需重启 idps-fw 应用新配置
 
 # 或直接调:
 sudo fw-verify --mode host \
@@ -124,8 +123,8 @@ fw-verify --mode android setup-env          # 额外注入 keystore 并自动重
   host 模式追加 `vsoc_url`(及证书)。
 
 > **host 与 Android 的服务重启差异**:Android 的 `setup-env` 会 `stop/start idps-fw`
-> 并等待健康(失败自动回滚配置);host 由 systemd 管理,`make setup-dev` 后需手动
-> `systemctl restart idps-fw.service`。
+> 并等待健康(失败自动回滚配置);host 的 `make setup-dev` 会在 systemd 可用时自动
+> 重启 `idps-fw.service`。直接调用 `fw-verify --mode host setup-env` 时仍需手动重启。
 
 拆环境(拆 veth/netns、还原 idps-fw 配置、删 fw-verify.conf):
 
@@ -328,7 +327,7 @@ fw-verify agent dump-events --since "$NOWMS"
 ```bash
 fw-verify --config /etc/idd/fw-verify.conf reset-rules   # 删下发的 depot 规则,回退默认
 # host:
-make clean-dev && sudo systemctl restart idps-fw.service
+make clean-dev
 # Android(设备上):
 fw-verify --mode android clean-env
 ```
@@ -347,7 +346,6 @@ cd /home/ubuntu/workspace/idps/vsoc && make deploy
 cd /home/ubuntu/workspace/idps && make install
 cd /home/ubuntu/workspace/idps/idps-fw && make install
 cd /home/ubuntu/workspace/idps/idps-fw-test && make install && make setup-dev
-sudo systemctl restart idps-fw.service
 make test-host
 
 # Android(打包后在设备上)

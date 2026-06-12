@@ -80,6 +80,8 @@ DEVICE_SERIAL ?=
 # Host runtime install
 BIN_INSTALL_DIR ?= /usr/local/bin
 HOST_LIB_INSTALL_DIR ?= /usr/local/lib
+SYSTEMCTL ?= systemctl
+IDPS_FW_SERVICE ?= idps-fw.service
 
 # Host-mode test topology defaults (passed to `fw-verify setup-env`).
 FWV_CONF ?= /etc/idd/fw-verify.conf
@@ -176,11 +178,21 @@ setup-dev: ensure-host-platform
 		--vsoc-cert "$(VSOC_CERT_DIR)/client.crt" \
 		--vsoc-key "$(VSOC_CERT_DIR)/client.key" \
 		setup-env
-	@printf "  $(C_DIM)next$(C_RESET): restart idps-fw, then: sudo NO_PROXY=127.0.0.1,localhost fw-verify --config %s run-all\n" "$(FWV_CONF)"
+	@if command -v "$(SYSTEMCTL)" >/dev/null 2>&1 && $(SYSTEMCTL) list-unit-files "$(IDPS_FW_SERVICE)" >/dev/null 2>&1; then \
+		sudo $(SYSTEMCTL) restart "$(IDPS_FW_SERVICE)"; \
+		printf "  $(C_GREEN)service$(C_RESET): restarted %s\n" "$(IDPS_FW_SERVICE)"; \
+		printf "  $(C_DIM)next$(C_RESET): sudo NO_PROXY=127.0.0.1,localhost fw-verify --config %s run-all\n" "$(FWV_CONF)"; \
+	else \
+		printf "  $(C_DIM)next$(C_RESET): restart idps-fw, then: sudo NO_PROXY=127.0.0.1,localhost fw-verify --config %s run-all\n" "$(FWV_CONF)"; \
+	fi
 
 # Tear down the host test topology and generated config.
 clean-dev: ensure-host-platform
 	@sudo "$(BIN_INSTALL_DIR)/fw-verify" --mode host clean-env
+	@if command -v "$(SYSTEMCTL)" >/dev/null 2>&1 && $(SYSTEMCTL) list-unit-files "$(IDPS_FW_SERVICE)" >/dev/null 2>&1; then \
+		sudo $(SYSTEMCTL) restart "$(IDPS_FW_SERVICE)"; \
+		printf "  $(C_GREEN)service$(C_RESET): restarted %s\n" "$(IDPS_FW_SERVICE)"; \
+	fi
 
 # Convenience: run the whole catalog in host mode using the generated config.
 test-host: ensure-host-platform
