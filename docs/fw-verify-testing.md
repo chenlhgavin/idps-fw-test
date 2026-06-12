@@ -25,6 +25,12 @@ fw-verify --config /etc/idd/fw-verify.conf run default-deny-carveout
    └──────────────────────────────────────────────┘
 ```
 
+**为什么是 veth + netns**:idps-fw 的执法点是挂在**具体接口**上的 eBPF tc 程序,而本机对本机 IP 的流量走 `lo`,tc hook 看不到——单设备测试必须"虚拟出第二台机器"。netns 提供独立网络栈(接口/路由/ARP/conntrack/socket 全隔离),进程放进去发包不会抄 loopback 近路;veth pair 等价一根网线,一端发出的以太帧原样从另一端收进(L2 真实,ARP 欺骗类用例也能跑)。`fwt0` 留在 root netns、`fwp0` 放进 `fwpeer`,idps-fw 配置只监控 `fwt0`,于是:
+
+- PEER → `10.123.0.1`:报文从 `fwp0` 发出、穿 veth、打在 `fwt0` **ingress**(入向/默认/匹配/检测用例);
+- TARGET → `10.123.0.2`:走 `fwt0` **egress**(出向用例);
+- blocked/allowed 判定(成功/超时/被拒)反映的就是 `fwt0` 上 tc hook 的真实执法。
+
 - **编排器**:本机 root,直接读 idps-fw 状态、在 TARGET 侧加密写 depot(进程内)。
 - **worker**:需要进 netns / 降 uid / 后台监听的步骤,通过重执行自身
   `fw-verify agent <子命令>` 完成——PEER 侧用 `nsenter --net=/run/netns/fwpeer`
@@ -116,6 +122,19 @@ fw-verify --mode android setup-env          # 额外注入 keystore 并自动重
 |---|---|---|---|
 | TARGET | root namespace | `fwt0` | `10.123.0.1/24` |
 | PEER | netns `fwpeer` | `fwp0` | `10.123.0.2/24` |
+
+建拓扑的等效命令(`setup-env` 先做幂等清理再执行;删 veth 任一端整对即销毁):
+
+```bash
+ip netns add fwpeer                                     # 新网络栈,ns 文件挂到 /run/netns/fwpeer
+ip link add fwt0 type veth peer name fwp0 netns fwpeer  # 不支持 netns 参数时回退:先建对,再 ip link set fwp0 netns fwpeer
+ip addr add 10.123.0.1/24 dev fwt0 && ip link set fwt0 up
+ip netns exec fwpeer ip link set lo up                  # 新 netns 里 lo 默认 down
+ip netns exec fwpeer ip addr add 10.123.0.2/24 dev fwp0
+ip netns exec fwpeer ip link set fwp0 up
+```
+
+两端同在 `10.123.0.0/24`,配地址即得直连路由,无需网关。需要"站到 PEER 侧"时,worker 以 `nsenter --net=/run/netns/fwpeer`(对该 ns 文件 `setns(2)`,只切网络命名空间)或回退 `ip netns exec fwpeer` 前缀重执行 `fw-verify agent ...`,其创建的 socket 全部属于 PEER 网络栈,发出的包必然穿 veth、过 `fwt0`、被 idps-fw 处理。
 
 - `/etc/idd/idps-fw.yaml`:监控 `fwt0`、缩短 rule/event/report/traffic 周期、注入
   app/UID 映射 `com.demo.browser` → uid `2000`。
